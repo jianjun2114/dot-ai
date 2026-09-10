@@ -1,10 +1,10 @@
 {
-  "name": "dot-ai",
+  "name": "dot_ai",
   "version": "1.0.0",
   "description": "基于AI的工具，具有shell、记事本、文档处理等功能",
   "main": "./out/main/index.js",
   "author": "liujj",
-  "productName": "圆点AI",
+  "productName": "DotAI",
   "homepage": "https://electron-vite.org",
   "scripts": {
     "format": "prettier --write .",

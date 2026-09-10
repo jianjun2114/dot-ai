@@ -1,5 +1,5 @@
 import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
-import { join } from 'path'
+import { join, dirname } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { exec } from 'child_process'
@@ -65,9 +65,50 @@ app.whenReady().then(() => {
 
   // IPC test
   // IPC 事件处理  start
-  // 获取应用路径
+  // 获取应用数据目录（优先安装目录，不可写则回退到 userData）
   ipcMain.handle('app-path', () => {
-    return app.getPath('userData')
+    // 开发模式下 getPath('exe') 指向 node_modules 中的 electron 二进制，
+    // 不是项目目录，直接用 userData
+    if (is.dev) {
+      return app.getPath('userData')
+    }
+
+    const installDir = dirname(app.getPath('exe'))
+    const userDataDir = app.getPath('userData')
+
+    // 检测安装目录是否可写：尝试创建/删除一个临时文件
+    try {
+      const testFile = join(installDir, '.dot-ai-write-test')
+      fs.writeFileSync(testFile, '', 'utf-8')
+      fs.unlinkSync(testFile)
+    } catch {
+      // Program Files 等受保护目录无写权限，回退到 userData
+      console.warn(
+        `[app-path] 安装目录 ${installDir} 不可写，回退到 userData: ${userDataDir}`
+      )
+      return userDataDir
+    }
+
+    // 生产环境 + 安装目录可写 → 返回安装目录，并迁移旧版本残留
+    // 如果旧 userData 里有 dot.json 但安装目录没有，说明是首次升级，做一次性迁移
+    const oldConfigFile = join(userDataDir, 'dot.json')
+    const newConfigFile = join(installDir, 'dot.json')
+    if (!fs.existsSync(newConfigFile) && fs.existsSync(oldConfigFile)) {
+      try {
+        fs.copyFileSync(oldConfigFile, newConfigFile)
+        // 迁移日历记事本等用户数据目录（如果存在）
+        const oldNotesDir = join(userDataDir, 'calendarNotes')
+        const newNotesDir = join(installDir, 'calendarNotes')
+        if (fs.existsSync(oldNotesDir) && !fs.existsSync(newNotesDir)) {
+          fs.cpSync(oldNotesDir, newNotesDir, { recursive: true })
+        }
+        console.info('[app-path] 已将旧 userData 中的配置迁移到安装目录')
+      } catch (err) {
+        console.warn('[app-path] 迁移旧配置失败:', err)
+      }
+    }
+
+    return installDir
   })
   // HTTP 请求代理 - 避免渲染进程 CORS 问题
   ipcMain.handle(

@@ -402,6 +402,7 @@ const sendMessage = async (text?: string): Promise<void> => {
   try {
     history.value.push({ role: 'user', content })
     // 最终回答写入多轮历史：保证后续提问时模型看到完整的 user/assistant 交替上下文
+    console.log('systemPrompt 系统提示:', systemPrompt())
     const reply = await runAgentLoop(
       [{ role: 'system', content: systemPrompt() }, ...history.value],
       abortCtl.signal
@@ -432,11 +433,12 @@ const sendToInput = (text: string): void => {
 /** 读取宿主上下文并请求 AI 分析 */
 const readContext = async (): Promise<void> => {
   const context = await props.getContext()
+  console.log('readContext 上下文', context)
   if (!context.trim()) {
     ElMessage.warning('当前没有可读取的内容')
     return
   }
-  await sendMessage('请分析以下内容，并给出下一步操作建议')
+  await sendMessage(`请分析以下内容，并给出下一步操作建议\n：${context}`)
 }
 
 /** 清空对话（生成中的请求先中止，展示消息与模型历史一并重置） */

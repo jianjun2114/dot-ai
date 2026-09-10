@@ -1,5 +1,19 @@
 import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-router'
 
+// 页面显示名称（路由 name → 窗口标题片段）
+// 带 " - " 的值视为完整标题（独立窗口用，不再追加后缀），否则自动追加 " - dot-ai"
+const PAGE_TITLES: Record<string, string> = {
+  Home: '首页',
+  Chat: '智能对话',
+  CalenNote: '日历记事本',
+  Toolbox: '百宝箱',
+  ToolboxApi: '接口测试',
+  ToolboxDoc: '文档转换',
+  ToolboxShell: '终端 - 百宝箱',
+  ToolboxBrowser: '浏览器 - 百宝箱',
+  Settings: '设置'
+}
+
 const routes: RouteRecordRaw[] = [
   {
     path: '/',
@@ -58,6 +72,14 @@ const routes: RouteRecordRaw[] = [
 const router = createRouter({
   history: createWebHashHistory(),
   routes
+})
+
+// 路由切换时更新窗口标题，Electron BrowserWindow 会自动跟随 document.title
+router.afterEach((to) => {
+  const name = to.name as string | undefined
+  const title = (name && PAGE_TITLES[name]) || name || 'dot-ai'
+  // 已含 " - " 视为完整标题（独立窗口），否则统一追加 " - dot-ai"
+  document.title = title.includes(' - ') ? title : `${title}`
 })
 
 export default router

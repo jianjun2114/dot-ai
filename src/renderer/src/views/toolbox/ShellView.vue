@@ -66,7 +66,9 @@ const shellCachePath = (): string => `${appBasePath}/${SHELL_CACHE_FILE}`
 
 /** 从 cache/shell.json 加载连接列表 */
 const loadConnections = async (): Promise<void> => {
+  const t0 = performance.now()
   appBasePath = await getAppPath()
+  console.log('加载时shell地址', shellCachePath())
   const content = (await window.dot.localFiles('read', shellCachePath())) as string
   if (!content) return
   try {
@@ -76,6 +78,7 @@ const loadConnections = async (): Promise<void> => {
   } catch {
     // 缓存文件损坏时忽略，保持空列表
   }
+  console.log(`[ShellView] loadConnections 总耗时: ${(performance.now() - t0).toFixed(2)}ms`)
 }
 
 /** 将连接列表与常用目录标签写回 cache/shell.json */
@@ -481,7 +484,7 @@ const sceneExtra = computed(() => {
     ? ''
     : tab.type === 'local'
       ? '当前连接：本地 Windows PowerShell（命令使用 Windows / PowerShell 语法）'
-      : `当前连接：SSH 远程 ${tab.ssh?.host ?? ''}（通常为 Linux，命令使用 bash 语法）`
+      : `当前连接：SSH 远程（通常为 Linux，命令使用 bash 语法）`
   return [osText, whitelist.value.length ? `白名单路径：${whitelist.value.join('、')}` : '']
     .filter(Boolean)
     .join('；')

@@ -138,6 +138,7 @@ export function parseMessageResponse(data: string): LlmResult {
       message?: {
         content?: string | null
         reasoning_content?: string
+        reasoning?: string
         tool_calls?: Array<{
           id?: string
           function?: { name?: string; arguments?: string }
@@ -148,7 +149,7 @@ export function parseMessageResponse(data: string): LlmResult {
   const message = payload.choices?.[0]?.message
   if (!message) throw new Error('大模型未返回有效内容')
   return {
-    reasoning: message.reasoning_content ?? '',
+    reasoning: message.reasoning_content ?? message.reasoning ?? '',
     content: (message.content ?? '').trim(),
     toolCalls: (message.tool_calls ?? []).map((tc) => ({
       id: tc.id ?? '',
@@ -164,6 +165,7 @@ export interface StreamPayload {
     delta?: {
       content?: string
       reasoning_content?: string
+      reasoning?: string
       tool_calls?: Array<{
         index?: number
         id?: string
@@ -183,7 +185,8 @@ function mergeStreamResponse(raw: string): LlmResult {
     const delta = (payload as StreamPayload).choices?.[0]?.delta
     if (!delta) continue
 
-    if (delta.reasoning_content) reasoning += delta.reasoning_content
+    const reasoningText = delta.reasoning_content ?? delta.reasoning ?? ''
+    if (reasoningText) reasoning += reasoningText
     if (delta.content) content += delta.content
 
     // 工具调用按 index 增量拼接（id/name 首帧给出，arguments 分片到达）
@@ -586,7 +589,8 @@ function buildStreamRequest(
       model: llm.model,
       temperature,
       stream: true,
-      messages: rest,
+      // 系统提示词必须放回 messages 首位（completions 协议无独立 system 字段）
+      messages: system ? [{ role: 'system', content: system }, ...rest] : rest,
       // 深度思考开关（vLLM / Qwen 系约定）
       ...(think ? { chat_template_kwargs: { thinking: true } } : {})
     }
@@ -672,7 +676,8 @@ export const sendLlmStream = async (
           // OpenAI 兼容事件流：choices[0].delta.content / reasoning_content
           const delta = (payload as StreamPayload).choices?.[0]?.delta
           contentDelta = delta?.content ?? ''
-          reasoningDelta = delta?.reasoning_content ?? ''
+          // OpenAI 兼容流 reasoning 字段命名不一：reasoning_content（DeepSeek R1 等）/ reasoning（部分新模型）
+          reasoningDelta = delta?.reasoning_content ?? delta?.reasoning ?? ''
         }
         if (contentDelta) {
           content += contentDelta

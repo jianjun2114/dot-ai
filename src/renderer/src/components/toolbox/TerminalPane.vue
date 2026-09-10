@@ -49,7 +49,7 @@ let fontSize = 13
 const MIN_FONT_SIZE = 10
 const MAX_FONT_SIZE = 24
 
-/** 亮色主题 ANSI 16 色（VS Code 浅色配色，浅色背景下对比度良好） */
+/** 亮色主题 ANSI 16 色（VS Code Light+ 配色，bright 系与普通色区分以保证粗体层次） */
 const LIGHT_ANSI: ITheme = {
   black: '#000000',
   red: '#cd3131',
@@ -60,33 +60,33 @@ const LIGHT_ANSI: ITheme = {
   cyan: '#0598bc',
   white: '#555555',
   brightBlack: '#666666',
-  brightRed: '#cd3131',
+  brightRed: '#f14c4c',
   brightGreen: '#14ce14',
   brightYellow: '#b5ba00',
-  brightBlue: '#0451a5',
-  brightMagenta: '#bc05bc',
-  brightCyan: '#0598bc',
+  brightBlue: '#3b8eea',
+  brightMagenta: '#d670d6',
+  brightCyan: '#29b8db',
   brightWhite: '#a5a5a5'
 }
 
-/** 暗色主题 ANSI 16 色（Catppuccin Mocha 风格，深色背景下柔和护眼） */
+/** 暗色主题 ANSI 16 色（VS Code Dark+ 标准 16 色，饱和度高、vim 语法色对比度正常） */
 const DARK_ANSI: ITheme = {
-  black: '#45475a',
-  red: '#f38ba8',
-  green: '#a6e3a1',
-  yellow: '#f9e2af',
-  blue: '#89b4fa',
-  magenta: '#f5c2e7',
-  cyan: '#94e2d5',
-  white: '#bac2de',
-  brightBlack: '#585b70',
-  brightRed: '#f38ba8',
-  brightGreen: '#a6e3a1',
-  brightYellow: '#f9e2af',
-  brightBlue: '#89b4fa',
-  brightMagenta: '#f5c2e7',
-  brightCyan: '#94e2d5',
-  brightWhite: '#a6adc8'
+  black: '#000000',
+  red: '#cd3131',
+  green: '#0dbc79',
+  yellow: '#e5e510',
+  blue: '#2472c8',
+  magenta: '#bc3fbc',
+  cyan: '#11a8cd',
+  white: '#e5e5e5',
+  brightBlack: '#666666',
+  brightRed: '#f14c4c',
+  brightGreen: '#23d18b',
+  brightYellow: '#f5f543',
+  brightBlue: '#3b8eea',
+  brightMagenta: '#d670d6',
+  brightCyan: '#29b8db',
+  brightWhite: '#ffffff'
 }
 
 /** 读取当前主题 CSS 变量（getPropertyValue 返回值需 trim 掉空白） */
@@ -246,6 +246,12 @@ const copyLink = (): void => {
   emit('copy-link')
 }
 
+/** 右键菜单：清屏（向 shell 发送 Ctrl+L，由 shell 重绘提示符，兼容 bash / PowerShell） */
+const clearScreen = (): void => {
+  closeMenu()
+  window.dot.toolbox.shell.write(props.sessionId, '\x0c')
+}
+
 /** 右键菜单：选中内容（无选中则取最近输出）发给 AI */
 const sendToAi = (): void => {
   closeMenu()
@@ -269,6 +275,9 @@ onMounted(() => {
   terminal.loadAddon(new WebLinksAddon())
   terminal.open(containerRef.value)
   fitAddon.fit()
+  // 初始尺寸必须同步给远端 PTY（SSH 固定以 80x24 创建），
+  // 否则 bash 按 80 列回绕换行，tab 补全长路径时会覆盖行首、回车内容错乱
+  window.dot.toolbox.shell.resize(props.sessionId, terminal.cols, terminal.rows)
 
   // 键盘输入 → 主进程
   terminal.onData((data) => {
@@ -335,6 +344,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  const t0 = performance.now()
   stopThemeWatch()
   resizeObserver?.disconnect()
   document.removeEventListener('click', closeMenu)
@@ -342,6 +352,7 @@ onBeforeUnmount(() => {
   if (flushTimer !== null) clearTimeout(flushTimer)
   unsubscribers.forEach((fn) => fn())
   terminal?.dispose()
+  console.log(`[TerminalPane] onBeforeUnmount 完成，耗时: ${(performance.now() - t0).toFixed(2)}ms`)
 })
 </script>
 
@@ -378,6 +389,7 @@ onBeforeUnmount(() => {
         <div class="term-menu-item" :class="{ disabled: isLocal }" @click.stop="copyLink">
           复制链接
         </div>
+        <div class="term-menu-item" @click.stop="clearScreen">清屏</div>
         <div class="term-menu-divider"></div>
         <div class="term-menu-item" @click.stop="sendToAi">转到 AI</div>
       </div>
@@ -389,9 +401,8 @@ onBeforeUnmount(() => {
 .terminal-wrap {
   width: 100%;
   height: 100%;
-  padding: 14px 16px;
-  background: var(--color-card);
   border-radius: 10px;
+  padding: 10px 12px;
   box-shadow: var(--shadow-card);
   overflow: hidden;
 }
