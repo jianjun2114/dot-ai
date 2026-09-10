@@ -5,7 +5,7 @@
 [![Electron](https://img.shields.io/badge/Electron-43-9feaf9?logo=electron&logoColor=black)](https://www.electronjs.org/)
 [![Vue](https://img.shields.io/badge/Vue-3-42b883?logo=vite&logoColor=white)](https://vuejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial-lightgrey.svg)](LICENSE)
 
 ## ✨ 功能亮点
 
@@ -101,8 +101,6 @@ dot-ai/
 
 - **不占端口** — 生产模式不监听任何本地端口，HTTP/WS/TCP 均为出站连接
 - **本地静态加载** — 生产渲染进程走 `loadFile`，不启动本地 HTTP server
-- **asar 归档 + Vite minify** — 前端代码压缩入 `app.asar`；敏感配置请让用户在设置中填写，不要硬编码
-- **Shell 危险命令防护** — rm / del / format / dd / rd 等命令需确认，支持会话级父目录白名单
 
 ## 🖥️ 系统要求
 
