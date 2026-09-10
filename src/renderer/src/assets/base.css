@@ -1,0 +1,196 @@
+/* ========================================
+   主题色板配置
+   使用 data-theme 属性切换主题：
+   - light: 浅色主题
+   - dark: 深色主题
+   - retro: 复古黄主题
+   - deep-blue: 深蓝主题
+   ======================================== */
+
+/* 浅色主题 */
+:root {
+  --color-primary: #0077DB;
+  --color-primary-light: #4dabff;
+  --color-primary-dark: #005a9e;
+  --color-bg: #f5f7fa;
+  --color-card: #ffffff;
+  --color-text: #1a1a2e;
+  --color-text-secondary: #6b7280;
+  --color-border: #e5e7eb;
+  --color-hover: #f0f4f8;
+  --shadow-card: 0 2px 12px rgba(0, 0, 0, 0.08);
+  --shadow-card-hover: 0 8px 30px rgba(0, 119, 219, 0.15);
+  /* 语义状态色 */
+  --color-success: #16a34a;
+  --color-warning: #d97706;
+  --color-danger: #dc2626;
+  /* 弹窗遮罩 */
+  --color-mask: rgba(0, 0, 0, 0.45);
+  /* 磨砂玻璃效果 */
+  --glass-bg: rgba(255, 255, 255, 0.15);
+  --glass-blur: blur(20px);
+  --glass-border: rgba(255, 255, 255, 0.2);
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+}
+
+/* 深色主题 */
+[data-theme="dark"] {
+  --color-bg: #0f172a;
+  --color-card: #252540;
+  --color-text: #f0f0f5;
+  --color-text-secondary: #a0a0b0;
+  --color-border: #3a3a5a;
+  --color-hover: #2a2a4a;
+  --shadow-card: 0 2px 12px rgba(0, 0, 0, 0.3);
+  --shadow-card-hover: 0 8px 30px rgba(0, 119, 219, 0.25);
+  /* 语义状态色 */
+  --color-success: #34d399;
+  --color-warning: #fbbf24;
+  --color-danger: #f87171;
+  /* 弹窗遮罩 */
+  --color-mask: rgba(0, 0, 0, 0.6);
+  /* 磨砂玻璃效果 */
+  --glass-bg: rgba(0, 0, 0, 0.5);
+  --glass-blur: blur(10px);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+}
+
+/* 复古黄主题 */
+[data-theme="retro"] {
+  --color-primary: #d4a017;
+  --color-primary-light: #f0c850;
+  --color-primary-dark: #a6780f;
+  --color-bg: #fdf6e3;
+  --color-card: #fef9e7;
+  --color-text: #5c4b37;
+  --color-text-secondary: #8b7355;
+  --color-border: #e8dcc8;
+  --color-hover: #f5edd8;
+  --shadow-card: 0 2px 12px rgba(92, 75, 55, 0.1);
+  --shadow-card-hover: 0 8px 30px rgba(212, 160, 23, 0.2);
+  /* 语义状态色 */
+  --color-success: #7a9a3d;
+  --color-warning: #c47f17;
+  --color-danger: #b0432f;
+  /* 弹窗遮罩 */
+  --color-mask: rgba(92, 75, 55, 0.45);
+  /* 磨砂玻璃效果 */
+  --glass-bg: rgba(253, 246, 227, 0.6);
+  --glass-blur: blur(15px);
+  --glass-border: rgba(212, 160, 23, 0.3);
+  --glass-shadow: 0 8px 32px rgba(92, 75, 55, 0.15);
+}
+
+/* 深蓝主题 */
+[data-theme="deep-blue"] {
+  --color-primary: #1e40af;
+  --color-primary-light: #3b82f6;
+  --color-primary-dark: #1e3a8a;
+  --color-bg: #0f172a;
+  --color-card: #1e293b;
+  --color-text: #e2e8f0;
+  --color-text-secondary: #94a3b8;
+  --color-border: #334155;
+  --color-hover: #1e293b;
+  --shadow-card: 0 2px 12px rgba(0, 0, 0, 0.4);
+  --shadow-card-hover: 0 8px 30px rgba(30, 64, 175, 0.3);
+  /* 语义状态色 */
+  --color-success: #4ade80;
+  --color-warning: #facc15;
+  --color-danger: #f87171;
+  /* 弹窗遮罩 */
+  --color-mask: rgba(2, 6, 23, 0.65);
+  /* 磨砂玻璃效果 */
+  --glass-bg: rgba(15, 23, 42, 0.6);
+  --glass-blur: blur(12px);
+  --glass-border: rgba(59, 130, 246, 0.2);
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+/* ========================================
+   基础重置与全局样式
+   ======================================== */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  font-weight: normal;
+}
+
+ul {
+  list-style: none;
+}
+
+body {
+  min-height: 100vh;
+  color: var(--color-text);
+  background: var(--color-bg);
+  line-height: 1.6;
+  font-family:
+    Inter,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    Roboto,
+    Oxygen,
+    Ubuntu,
+    Cantarell,
+    'Fira Sans',
+    'Droid Sans',
+    'Helvetica Neue',
+    sans-serif;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ========================================
+   Element Plus 组件库变量映射
+   将组件库核心变量指向应用主题变量，
+   使 el-input / el-tree / el-tabs 等组件
+   在全部主题下颜色一致。
+   ======================================== */
+:root,
+:root[data-theme='light'],
+:root[data-theme='dark'],
+:root[data-theme='retro'],
+:root[data-theme='deep-blue'] {
+  /* 表面背景 */
+  --el-bg-color: var(--color-card);
+  --el-bg-color-page: var(--color-bg);
+  --el-bg-color-overlay: var(--color-card);
+  --el-fill-color-blank: var(--color-card);
+  --el-fill-color-light: var(--color-hover);
+  /* 文本 */
+  --el-text-color-primary: var(--color-text);
+  --el-text-color-regular: var(--color-text);
+  --el-text-color-secondary: var(--color-text-secondary);
+  /* 边框 */
+  --el-border-color: var(--color-border);
+  --el-border-color-light: var(--color-border);
+  --el-border-color-lighter: var(--color-border);
+  /* 品牌色 */
+  --el-color-primary: var(--color-primary);
+  --el-color-primary-light-3: var(--color-primary-light);
+  --el-color-primary-light-5: var(--color-primary-light);
+  --el-color-primary-light-7: var(--color-hover);
+  --el-color-primary-light-8: var(--color-hover);
+  --el-color-primary-light-9: var(--color-hover);
+  --el-color-primary-dark-2: var(--color-primary-dark);
+  /* Loading */
+  --el-loading-bg: var(--color-mask);
+  --el-loading-spinner-color: var(--color-primary);
+}
+
+/* ========================================
+   Loading 动画样式覆盖
+   ======================================== */
+.el-loading-mask {
+  background-color: transparent !important;
+}
+
+.el-loading-spinner .circular {
+  stroke: var(--color-primary) !important;
+}
