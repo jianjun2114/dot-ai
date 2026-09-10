@@ -20,8 +20,6 @@ nsis:
   createDesktopShortcut: always
   oneClick: false
   allowToChangeInstallationDirectory: true
-  createInstaller: true
-  perMachine: false
 mac:
   entitlementsInherit: build/entitlements.mac.plist
   extendInfo:

@@ -210,7 +210,7 @@ export interface LlmRequest {
 
 /**
  * 规范化接口基础地址：去除末尾斜杠与误填的 /v1（统一由请求路径补齐），
- * 如 http://10.250.21.37:23333 或 http://10.250.21.37:23333/v1 → http://10.250.21.37:23333
+ * 如 http://127.0.0.1:2333
  */
 export function normalizeLlmBase(baseUrl: string): string {
   return baseUrl.trim().replace(/\/+$/, '').replace(/\/v1$/, '')
