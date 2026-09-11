@@ -56,13 +56,16 @@ export interface ToolboxApi {
     upload: (
       sessionId: string,
       localPath: string,
-      remotePath: string
+      remotePath: string,
+      transferId?: string
     ) => Promise<{ success: boolean }>
     download: (
       sessionId: string,
       remotePath: string,
-      localPath: string
+      localPath: string,
+      transferId?: string
     ) => Promise<{ success: boolean }>
+    onSftpProgress: (callback: (data: { transferId: string; percent: number }) => void) => void
     mkdir: (sessionId: string, path: string) => Promise<{ success: boolean; message?: string }>
     remove: (
       sessionId: string,

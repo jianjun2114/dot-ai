@@ -87,21 +87,28 @@ const toolbox = {
     ): Promise<{ name: string; type: string; size: number; modifyTime: number }[]> =>
       ipcRenderer.invoke('tb:sftp-list', { sessionId, path }),
 
-    /** 上传本地文件到远程 */
+    /** 上传本地文件到远程（transferId 用于进度上报） */
     upload: (
       sessionId: string,
       localPath: string,
-      remotePath: string
+      remotePath: string,
+      transferId?: string
     ): Promise<{ success: boolean }> =>
-      ipcRenderer.invoke('tb:sftp-upload', { sessionId, localPath, remotePath }),
+      ipcRenderer.invoke('tb:sftp-upload', { sessionId, localPath, remotePath, transferId }),
 
-    /** 下载远程文件到本地 */
+    /** 下载远程文件到本地（transferId 用于进度上报） */
     download: (
       sessionId: string,
       remotePath: string,
-      localPath: string
+      localPath: string,
+      transferId?: string
     ): Promise<{ success: boolean }> =>
-      ipcRenderer.invoke('tb:sftp-download', { sessionId, remotePath, localPath }),
+      ipcRenderer.invoke('tb:sftp-download', { sessionId, remotePath, localPath, transferId }),
+
+    /** 监听传输进度（upload/download 携带 transferId 时回调） */
+    onSftpProgress: (callback: (data: { transferId: string; percent: number }) => void): void => {
+      ipcRenderer.on('tb:sftp-progress', (_event, data) => callback(data))
+    },
 
     /** 创建远程目录 */
     mkdir: (sessionId: string, path: string): Promise<{ success: boolean; message?: string }> =>

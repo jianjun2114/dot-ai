@@ -11,7 +11,7 @@
  */
 import { ipcMain, BrowserWindow, dialog } from 'electron'
 import { spawn, type ChildProcess } from 'child_process'
-import { createReadStream, createWriteStream, statSync, readdirSync } from 'fs'
+import { statSync, readdirSync } from 'fs'
 import { basename, join } from 'path'
 import { homedir } from 'os'
 import { Client, type ClientChannel, type SFTPWrapper } from 'ssh2'
@@ -119,6 +119,21 @@ const destroySession = (session: ShellSession, reason: string): void => {
   }
 }
 
+/**
+ * SSH 连接吞吐调优：
+ * - windowSize：SSH 通道流控窗口，默认仅 2MB，高延迟链路上会频繁等窗口刷新导致吞吐受限；
+ *   调大后多个 SFTP 分片可以同时「在途」，配合 fastPut/fastGet 并发才能真正吃满带宽
+ * - highWaterMark：通道流缓冲水位，调大减少背压停顿
+ * - cipher 优先 aes128-gcm/aes128-ctr：AES-128 硬件加速下比默认 aes256-ctr 快 30%~100%
+ */
+const SSH_TUNING = {
+  windowSize: 8 * 1024 * 1024,
+  highWaterMark: 1024 * 1024,
+  algorithms: {
+    cipher: ['aes128-gcm@openssh.com', 'aes128-ctr', 'aes192-ctr', 'aes256-ctr']
+  }
+} as const
+
 /** 创建远程 SSH 会话：连接服务器并打开交互式 shell */
 const createSshSession = (
   sessionId: string,
@@ -161,7 +176,8 @@ const createSshSession = (
       username: options.username,
       password: options.password,
       readyTimeout: 15000,
-      tryKeyboard: true
+      tryKeyboard: true,
+      ...SSH_TUNING
     })
   })
 }
@@ -384,54 +400,91 @@ export function registerToolboxShellIpc(): void {
     })
   })
 
-  // 上传本地文件到远程目录
+  /** fastPut/fastGet 并发传输进度回调：按百分比节流上报，避免 IPC 洪泛 */
+  const makeProgressReporter = (
+    sender: Electron.WebContents,
+    transferId: string | undefined
+  ): ((transferred: number, _chunk: number, total: number) => void) => {
+    let lastPercent = -1
+    return (transferred, _chunk, total) => {
+      if (!transferId || total <= 0) return
+      const percent = Math.min(99, Math.round((transferred / total) * 100))
+      if (percent !== lastPercent) {
+        lastPercent = percent
+        sender.send('tb:sftp-progress', { transferId, percent })
+      }
+    }
+  }
+
+  // 上传本地文件到远程目录（fastPut 并发传输，远快于单请求 pipe）
   ipcMain.handle(
     'tb:sftp-upload',
-    async (_event, options: { sessionId: string; localPath: string; remotePath: string }) => {
+    async (
+      _event,
+      options: { sessionId: string; localPath: string; remotePath: string; transferId?: string }
+    ) => {
       const session = getSession(options.sessionId)
       const sftp = await openSftp(session)
       return new Promise((resolve, reject) => {
-        const rs = createReadStream(options.localPath)
-        const ws = sftp.createWriteStream(options.remotePath)
-        rs.on('error', (err) => {
-          sftp.end()
-          reject(err)
-        })
-        ws.on('error', (err) => {
-          sftp.end()
-          reject(err)
-        })
-        ws.on('close', () => {
-          sftp.end()
-          resolve({ success: true })
-        })
-        rs.pipe(ws)
+        sftp.fastPut(
+          options.localPath,
+          options.remotePath,
+          {
+            // 并发 64 路、每片 64KB：吞吐瓶颈从 RTT 变为带宽
+            concurrency: 64,
+            chunkSize: 65536,
+            step: makeProgressReporter(_event.sender, options.transferId)
+          },
+          (err) => {
+            sftp.end()
+            if (err) reject(err)
+            else {
+              if (options.transferId) {
+                _event.sender.send('tb:sftp-progress', {
+                  transferId: options.transferId,
+                  percent: 100
+                })
+              }
+              resolve({ success: true })
+            }
+          }
+        )
       })
     }
   )
 
-  // 下载远程文件到本地
+  // 下载远程文件到本地（fastGet 并发传输）
   ipcMain.handle(
     'tb:sftp-download',
-    async (_event, options: { sessionId: string; remotePath: string; localPath: string }) => {
+    async (
+      _event,
+      options: { sessionId: string; remotePath: string; localPath: string; transferId?: string }
+    ) => {
       const session = getSession(options.sessionId)
       const sftp = await openSftp(session)
       return new Promise((resolve, reject) => {
-        const rs = sftp.createReadStream(options.remotePath)
-        const ws = createWriteStream(options.localPath)
-        rs.on('error', (err) => {
-          sftp.end()
-          reject(err)
-        })
-        ws.on('error', (err) => {
-          sftp.end()
-          reject(err)
-        })
-        ws.on('close', () => {
-          sftp.end()
-          resolve({ success: true })
-        })
-        rs.pipe(ws)
+        sftp.fastGet(
+          options.remotePath,
+          options.localPath,
+          {
+            concurrency: 64,
+            chunkSize: 65536,
+            step: makeProgressReporter(_event.sender, options.transferId)
+          },
+          (err) => {
+            sftp.end()
+            if (err) reject(err)
+            else {
+              if (options.transferId) {
+                _event.sender.send('tb:sftp-progress', {
+                  transferId: options.transferId,
+                  percent: 100
+                })
+              }
+              resolve({ success: true })
+            }
+          }
+        )
       })
     }
   )

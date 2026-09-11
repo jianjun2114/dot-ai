@@ -10,11 +10,12 @@
  * - SFTP 文件传输：上方本地目录、下方远程目录双栏浏览，直观上传/下载
  * - AI 面板：读取终端内容分析、AI 生成命令一键执行
  */
-import { ref, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Monitor,
   Connection,
+  Folder,
   FolderOpened,
   MagicStick,
   Plus,
@@ -351,7 +352,8 @@ const categorySuggestions = computed(() =>
 )
 
 const toggleGroup = (cat: string): void => {
-  groupExpanded.value = { ...groupExpanded.value, [cat]: !groupExpanded.value[cat] }
+  // 未记录过的分类默认视为展开（与模板 !== false 一致），首次点击应收起而不是保持展开
+  groupExpanded.value = { ...groupExpanded.value, [cat]: !(groupExpanded.value[cat] !== false) }
 }
 
 /** 分类输入自动补全：按输入过滤已有分类，也允许输入新分类 */
@@ -920,6 +922,30 @@ const onSftpSessionChange = async (): Promise<void> => {
   await loadRemoteList(sftpPath.value)
 }
 
+/** 进行中的 SFTP 传输：transferId -> { name, dir, percent } */
+const sftpTransfers = reactive<Record<string, { name: string; dir: 'up' | 'down'; percent: number }>>({})
+/** 监听主进程传输进度，更新对应条目百分比 */
+toolbox.sftp.onSftpProgress(({ transferId, percent }) => {
+  if (sftpTransfers[transferId]) sftpTransfers[transferId].percent = percent
+})
+/** 判断某文件是否正在传输（dir: up=上传 down=下载） */
+const isTransferring = (dir: 'up' | 'down', name: string): boolean =>
+  Object.values(sftpTransfers).some((t) => t.dir === dir && t.name === name)
+/** 行内样式工厂：dir='up' 只在本地表显示进度条，dir='down' 只在远程表显示（避免同文件名两栏同时染色） */
+const makeTransferRowStyle =
+  (dir: 'up' | 'down') =>
+  ({ row }: { row: FileEntry }): Record<string, string> => {
+    const t = Object.values(sftpTransfers).find((item) => item.dir === dir && item.name === row.name)
+    if (!t) return {}
+    const p = Math.max(0, Math.min(100, t.percent))
+    return {
+      backgroundImage: `linear-gradient(to right, rgba(103, 194, 58, 0.45) ${p}%, transparent ${p}%)`,
+      transition: 'background-image 0.2s'
+    }
+  }
+const localRowStyle = makeTransferRowStyle('up')
+const remoteRowStyle = makeTransferRowStyle('down')
+
 /** 上传指定本地文件到远程当前目录 */
 const uploadSelected = async (row?: FileEntry): Promise<void> => {
   const file = row || selectedLocal.value
@@ -931,14 +957,19 @@ const uploadSelected = async (row?: FileEntry): Promise<void> => {
     ElMessage.warning('暂不支持上传目录，请选择文件')
     return
   }
+  if (isTransferring('up', file.name)) return
   const localFile = joinLocalPath(localPath.value, file.name)
   const remoteFile = joinRemotePath(sftpPath.value, file.name)
+  const transferId = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  sftpTransfers[transferId] = { name: file.name, dir: 'up', percent: 0 }
   try {
-    await toolbox.sftp.upload(sftpSessionId.value, localFile, remoteFile)
+    await toolbox.sftp.upload(sftpSessionId.value, localFile, remoteFile, transferId)
     ElMessage.success(`已上传 ${file.name}`)
     await loadRemoteList()
   } catch (e) {
     ElMessage.error(`上传失败: ${e}`)
+  } finally {
+    delete sftpTransfers[transferId]
   }
 }
 
@@ -953,14 +984,19 @@ const downloadSelected = async (row?: FileEntry): Promise<void> => {
     ElMessage.warning('暂不支持下载目录，请选择文件')
     return
   }
+  if (isTransferring('down', file.name)) return
   const remoteFile = joinRemotePath(sftpPath.value, file.name)
   const localFile = joinLocalPath(localPath.value, file.name)
+  const transferId = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  sftpTransfers[transferId] = { name: file.name, dir: 'down', percent: 0 }
   try {
-    await toolbox.sftp.download(sftpSessionId.value, remoteFile, localFile)
+    await toolbox.sftp.download(sftpSessionId.value, remoteFile, localFile, transferId)
     ElMessage.success(`已下载 ${file.name}`)
     await loadLocalList()
   } catch (e) {
     ElMessage.error(`下载失败: ${e}`)
+  } finally {
+    delete sftpTransfers[transferId]
   }
 }
 
@@ -1080,6 +1116,10 @@ onMounted(loadConnections)
                 :size="12"
                 ><CaretRight
               /></el-icon>
+              <el-icon class="conn-group-folder" :size="13">
+                <FolderOpened v-if="groupExpanded[cat] !== false" />
+                <Folder v-else />
+              </el-icon>
               <span class="conn-group-name">{{ cat }}</span>
               <span class="conn-group-count">{{ conns.length }}</span>
             </div>
@@ -1325,6 +1365,7 @@ onMounted(loadConnections)
               height="100%"
               size="small"
               highlight-current-row
+              :row-style="localRowStyle"
               @current-change="(row: any) => (selectedLocal = row)"
             >
               <el-table-column label="名称">
@@ -1350,7 +1391,8 @@ onMounted(loadConnections)
                     text
                     type="primary"
                     :icon="Upload"
-                    title="上传到远程当前目录"
+                    :disabled="isTransferring('up', row.name)"
+                    :title="isTransferring('up', row.name) ? '上传中...' : '上传到远程当前目录'"
                     @click="uploadSelected(row)"
                   >
                     上传
@@ -1435,6 +1477,7 @@ onMounted(loadConnections)
               height="100%"
               size="small"
               highlight-current-row
+              :row-style="remoteRowStyle"
               @current-change="(row: any) => (selectedRemote = row)"
             >
               <el-table-column label="名称">
@@ -1460,7 +1503,8 @@ onMounted(loadConnections)
                     text
                     type="primary"
                     :icon="Download"
-                    title="下载到本地当前目录"
+                    :disabled="isTransferring('down', row.name)"
+                    :title="isTransferring('down', row.name) ? '下载中...' : '下载到本地当前目录'"
                     @click="downloadSelected(row)"
                   >
                     下载
@@ -1579,6 +1623,12 @@ onMounted(loadConnections)
 
 .conn-group-arrow.open {
   transform: rotate(90deg);
+}
+
+/* 分类名前的文件夹小图标 */
+.conn-group-folder {
+  flex-shrink: 0;
+  color: var(--color-warning, #e6a23c);
 }
 
 .conn-group-name {
@@ -1794,6 +1844,14 @@ onMounted(loadConnections)
   flex: 1;
   height: 0;
   overflow: hidden;
+}
+
+/* 传输进度条画在 tr 背景上；选中行/悬停行的 td 背景会盖住它，置为透明让绿色进度可见 */
+.sftp-table-wrap :deep(tr.current-row > td.el-table__cell) {
+  background-color: transparent !important;
+}
+.sftp-table-wrap :deep(tr:hover > td.el-table__cell) {
+  background-color: transparent;
 }
 
 /* 常用目录标签 */
