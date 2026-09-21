@@ -10,7 +10,7 @@
  *   终端输出(STDOUT/SSH Stream/PTY) --> 主进程 --tb:shell-data--> 渲染进程 --> xterm 展示
  */
 import { ipcMain, BrowserWindow, dialog } from 'electron'
-import { spawn, type ChildProcess } from 'child_process'
+import { spawn, execFile, type ChildProcess } from 'child_process'
 import { statSync, readdirSync } from 'fs'
 import { basename, join } from 'path'
 import { homedir } from 'os'
@@ -568,4 +568,77 @@ export function registerToolboxShellIpc(): void {
 
   // 取文件名工具（渲染进程展示用）
   ipcMain.handle('tb:basename', (_event, path: string) => basename(path || ''))
+
+  // ==================== Office 文档高保真转换（Word / PDF 互转） ====================
+
+  /** 执行命令并捕获输出（超时后抛错） */
+  const execCmd = (file: string, args: string[], timeout = 180000): Promise<string> =>
+    new Promise((resolve, reject) => {
+      execFile(
+        file,
+        args,
+        { timeout, windowsHide: true, maxBuffer: 10 * 1024 * 1024 },
+        (err, stdout, stderr) => {
+          if (err) reject(new Error(`${stdout || ''}${stderr || ''}` || err.message))
+          else resolve(String(stdout))
+        }
+      )
+    })
+
+  /** 检测本机是否安装 Microsoft Word（通过注册表） */
+  const detectWordCom = async (): Promise<boolean> => {
+    try {
+      await execCmd('reg', ['query', 'HKEY_CLASSES_ROOT\\Word.Application\\CurVer'], 10000)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * 用 Word COM（PowerShell 脚本）转换
+   * word2pdf: SaveAs2 FileFormat 17 (wdFormatPDF)
+   * pdf2word: Word 2013+ 自动把 PDF 转为可编辑文档，SaveAs2 FileFormat 12 (wdFormatXMLDocument/docx)
+   * 使用 -EncodedCommand 传递 UTF-16LE 脚本，避免中文路径被 ANSI 解码损坏
+   */
+  const convertWithWord = async (inputPath: string, outputPath: string): Promise<void> => {
+    const q = (s: string): string => `'${s.replace(/'/g, "''")}'`
+    const script = [
+      '$ErrorActionPreference = "Stop"',
+      `$word = New-Object -ComObject Word.Application`,
+      `$word.Visible = $false`,
+      `$word.DisplayAlerts = 0`,
+      `try {`,
+      `  $doc = $word.Documents.Open(${q(inputPath)}, $false, $true)`,
+      `  $doc.SaveAs2(${q(outputPath)}, ${outputPath.toLowerCase().endsWith('.pdf') ? 17 : 12})`,
+      `  $doc.Close($false)`,
+      `} finally {`,
+      `  $word.Quit()`,
+      `  [System.Runtime.InteropServices.Marshal]::ReleaseComObject($word) | Out-Null`,
+      `}`
+    ].join('\r\n')
+    const encoded = Buffer.from(script, 'utf16le').toString('base64')
+    await execCmd(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
+      300000
+    )
+  }
+
+  // Office 高保真转换：word→pdf / pdf→word（使用本机 Microsoft Word）
+  ipcMain.handle(
+    'tb:office-convert',
+    async (_event, options: { inputPath: string; outputPath: string }) => {
+      const { inputPath, outputPath } = options
+      try {
+        if (!(await detectWordCom())) {
+          return { success: false, message: '未检测到 Microsoft Word，已回退到内置转换' }
+        }
+        await convertWithWord(inputPath, outputPath)
+        return { success: true, engine: 'Microsoft Word' }
+      } catch (e) {
+        return { success: false, message: String(e) }
+      }
+    }
+  )
 }

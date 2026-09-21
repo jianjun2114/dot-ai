@@ -8,6 +8,7 @@ import https from 'https'
 import fs from 'fs'
 import { registerToolboxShellIpc } from './toolboxShell'
 import { registerToolboxNetIpc } from './toolboxNet'
+import { registerToolboxDbIpc } from './toolboxDb'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -83,9 +84,7 @@ app.whenReady().then(() => {
       fs.unlinkSync(testFile)
     } catch {
       // Program Files 等受保护目录无写权限，回退到 userData
-      console.warn(
-        `[app-path] 安装目录 ${installDir} 不可写，回退到 userData: ${userDataDir}`
-      )
+      console.warn(`[app-path] 安装目录 ${installDir} 不可写，回退到 userData: ${userDataDir}`)
       return userDataDir
     }
 
@@ -119,15 +118,20 @@ app.whenReady().then(() => {
         method: 'GET' | 'POST' | 'PUT' | 'DELETE'
         path: string
         body?: string
+        /** 二进制请求体（base64），与 body 二选一，用于 multipart/文件上传 */
+        bodyBase64?: string
         headers?: Record<string, string>
+        /** 响应按二进制返回（dataBase64），用于文件下载等场景 */
+        binary?: boolean
       }
     ) => {
-      const { method, path, body, headers } = options
+      const { method, path, body, bodyBase64, headers, binary } = options
       const url = /^https?:\/\//.test(path) ? path : `${DEFAULT_CONFIG.apiUrl}${path}`
 
       return new Promise<{
         status: number
         data: string
+        dataBase64?: string
         headers: Record<string, string | string[] | undefined>
       }>((resolve, reject) => {
         const urlObj = new URL(url)
@@ -145,14 +149,16 @@ app.whenReady().then(() => {
             }
           },
           (res) => {
-            let data = ''
-            res.on('data', (chunk) => {
-              data += chunk
+            const chunks: Buffer[] = []
+            res.on('data', (chunk: Buffer) => {
+              chunks.push(chunk)
             })
             res.on('end', () => {
+              const buf = Buffer.concat(chunks)
               resolve({
                 status: res.statusCode || 500,
-                data,
+                data: buf.toString('utf-8'),
+                ...(binary ? { dataBase64: buf.toString('base64') } : {}),
                 headers: res.headers
               })
             })
@@ -163,7 +169,9 @@ app.whenReady().then(() => {
           reject(err.message)
         })
 
-        if (body) {
+        if (bodyBase64) {
+          req.write(Buffer.from(bodyBase64, 'base64'))
+        } else if (body) {
           req.write(body)
         }
         req.end()
@@ -331,9 +339,10 @@ app.whenReady().then(() => {
     }
   )
 
-  // 注册百宝箱模块（多会话 Shell/SFTP + HTTP/WS/TCP 网络代理）
+  // 注册百宝箱模块（多会话 Shell/SFTP + HTTP/WS/TCP 网络代理 + 数据库管理）
   registerToolboxShellIpc()
   registerToolboxNetIpc()
+  registerToolboxDbIpc()
 
   // 打开百宝箱 Shell 独立窗口
   ipcMain.handle('tb:open-shell-window', () => {
@@ -380,6 +389,35 @@ app.whenReady().then(() => {
     } else {
       browserWindow.loadFile(join(__dirname, '../renderer/index.html'), {
         hash: '/toolbox/browser'
+      })
+    }
+    return { success: true }
+  })
+
+  // 打开百宝箱数据库独立窗口（最大化全屏）
+  ipcMain.handle('tb:open-database-window', () => {
+    const dbWindow = new BrowserWindow({
+      width: 1440,
+      height: 900,
+      minWidth: 1100,
+      minHeight: 680,
+      title: '数据库 - 百宝箱',
+      autoHideMenuBar: true,
+      ...(process.platform === 'linux' ? { icon } : {}),
+      webPreferences: {
+        preload: join(__dirname, '../preload/index.js'),
+        sandbox: false
+      }
+    })
+    // 最大化呈现（接近全屏，保留系统任务栏与窗口控件）
+    dbWindow.maximize()
+
+    // 开发环境加载 dev server，生产环境加载本地文件，hash 路由指向数据库页面
+    if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
+      dbWindow.loadURL(`${process.env['ELECTRON_RENDERER_URL']}#/toolbox/database`)
+    } else {
+      dbWindow.loadFile(join(__dirname, '../renderer/index.html'), {
+        hash: '/toolbox/database'
       })
     }
     return { success: true }

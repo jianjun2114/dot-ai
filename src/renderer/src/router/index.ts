@@ -9,8 +9,10 @@ const PAGE_TITLES: Record<string, string> = {
   Toolbox: '百宝箱',
   ToolboxApi: '接口测试',
   ToolboxDoc: '文档转换',
+  ToolboxDocEdit: '文档编辑',
   ToolboxShell: '终端 - 百宝箱',
   ToolboxBrowser: '浏览器 - 百宝箱',
+  ToolboxDatabase: '数据库 - 百宝箱',
   Settings: '设置'
 }
 
@@ -47,6 +49,12 @@ const routes: RouteRecordRaw[] = [
         path: 'doc',
         name: 'ToolboxDoc',
         component: () => import('../views/toolbox/DocConvertView.vue')
+      },
+      {
+        // 文档在线编辑（本窗口跳转）
+        path: 'doc-edit',
+        name: 'ToolboxDocEdit',
+        component: () => import('../views/toolbox/DocEditView.vue')
       }
     ]
   },
@@ -61,6 +69,12 @@ const routes: RouteRecordRaw[] = [
     path: '/toolbox/browser',
     name: 'ToolboxBrowser',
     component: () => import('../views/toolbox/BrowserView.vue')
+  },
+  {
+    // 数据库独立窗口页面（由主进程新窗口最大化加载）
+    path: '/toolbox/database',
+    name: 'ToolboxDatabase',
+    component: () => import('../views/toolbox/DatabaseView.vue')
   },
   {
     path: '/settings',

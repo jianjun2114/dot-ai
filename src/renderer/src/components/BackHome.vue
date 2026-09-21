@@ -2,11 +2,14 @@
 import { useRouter } from 'vue-router'
 import { useTheme } from '../composables/useTheme'
 
+/** 返回目标路由名称，默认首页；百宝箱子页面传 'Toolbox' 返回百宝箱 */
+const props = withDefaults(defineProps<{ to?: string }>(), { to: 'Home' })
+
 const router = useRouter()
 const { theme } = useTheme()
 
 const goHome = (): void => {
-  router.push({ name: 'Home' })
+  router.push({ name: props.to })
 }
 </script>
 

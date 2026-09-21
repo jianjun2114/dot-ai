@@ -6,10 +6,11 @@
  * - 记事本目录：通过系统目录选择器选取记事本根目录
  */
 import { ref } from 'vue'
-import { FolderOpened } from '@element-plus/icons-vue'
+import { FolderOpened, Link, Connection } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useTheme, type Theme } from '../../composables/useTheme'
 import { useSettings } from '../../composables/useSettings'
+import { docFetch } from '../../utils/docApi'
 
 const { theme, setTheme } = useTheme()
 const { settings } = useSettings()
@@ -52,6 +53,42 @@ const themeOptions: ThemeOption[] = [
 
 /** 是否正在选择目录 */
 const picking = ref(false)
+
+/** 在线文档编辑后端服务地址（本地草稿，检测通过后同步） */
+const docServerDraft = ref('')
+const docChecking = ref(false)
+
+/** 初始化草稿值（仅首次） */
+let docDraftInit = false
+const syncDocDrafts = (): void => {
+  if (docDraftInit) return
+  docServerDraft.value = settings.value.docEditServerUrl
+  docDraftInit = true
+}
+syncDocDrafts()
+
+/** 检测文档服务可用性（/doc/list 返回 200 即正常） */
+const checkDocServer = async (): Promise<void> => {
+  const raw = docServerDraft.value.trim().replace(/\/+$/, '')
+  if (!raw) {
+    ElMessage.warning('请先填写文档服务地址')
+    return
+  }
+  docChecking.value = true
+  try {
+    const resp = await docFetch(`${raw}/doc/list`)
+    if (resp.ok) {
+      settings.value.docEditServerUrl = raw
+      ElMessage.success('服务可用，配置已保存')
+    } else {
+      ElMessage.error(`服务响应异常（HTTP ${resp.status}），请检查地址与部署`)
+    }
+  } catch (e) {
+    ElMessage.error((e as Error).message || '无法连接服务，请检查地址、端口与网络')
+  } finally {
+    docChecking.value = false
+  }
+}
 
 /** 打开系统目录选择器，选取记事本根目录 */
 const chooseNotesDir = async (): Promise<void> => {
@@ -111,6 +148,33 @@ const chooseNotesDir = async (): Promise<void> => {
           <span v-if="theme === option.value" class="theme-check">✓</span>
         </button>
       </div>
+    </div>
+
+    <!-- 在线文档编辑（ONLYOFFICE） -->
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">在线文档编辑（ONLYOFFICE）</span>
+        <span class="card-desc">文档编辑功能使用的后端文档服务地址</span>
+      </div>
+      <div class="dir-row doc-row">
+        <el-input
+          v-model="docServerDraft"
+          placeholder="如 http://192.168.0.1:8080（不要以 / 结尾）"
+          clearable
+          class="dir-input"
+        >
+          <template #prefix>
+            <el-icon><Link /></el-icon>
+          </template>
+        </el-input>
+        <el-button type="primary" :icon="Connection" :loading="docChecking" @click="checkDocServer">
+          检测并保存
+        </el-button>
+      </div>
+      <p class="doc-hint">
+        填写后端文档服务地址（即 onlyoffice.public-url 对应的服务），Document Server 地址、JWT
+        均由该服务下发，无需在此填写
+      </p>
     </div>
 
     <!-- 记事本目录 -->
@@ -287,6 +351,16 @@ const chooseNotesDir = async (): Promise<void> => {
 
 .dir-input {
   flex: 1;
+}
+
+.doc-row + .doc-row {
+  margin-top: 12px;
+}
+
+.doc-hint {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--color-text-secondary);
 }
 
 /* ============ 移动端适配 ============ */

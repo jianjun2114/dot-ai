@@ -44,7 +44,7 @@ const convertTypes: ConvertType[] = [
   {
     key: 'word2pdf',
     title: 'Word → PDF',
-    desc: 'docx 文档转换为 PDF',
+    desc: 'docx 转换为 PDF（使用本机 Word 保留格式）',
     extensions: ['docx'],
     fileBased: true
   },
@@ -72,7 +72,7 @@ const convertTypes: ConvertType[] = [
   {
     key: 'pdf2word',
     title: 'PDF → Word',
-    desc: 'PDF 提取文本生成 Word 文档',
+    desc: 'PDF 转换为 Word 文档（使用本机 Word 保留格式）',
     extensions: ['pdf'],
     fileBased: true
   },
@@ -202,20 +202,41 @@ const escapeHtml = (text: string): string =>
 
 // ==================== 各类型转换实现 ====================
 
-/** Word(docx) → PDF：mammoth 提取 HTML 后转 PDF */
+/** 写入已选定的保存路径（不再二次弹窗） */
+const saveToChosenPath = async (savePath: string, dataBase64: string): Promise<void> => {
+  await toolboxFile.save(savePath, dataBase64.includes(',') ? dataBase64.split(',')[1] : dataBase64)
+  resultMessage.value = `已保存到：${savePath}`
+  ElMessage.success('转换完成')
+}
+
+/** Word(docx) → PDF：先选保存路径，再走本机 Word 保真转换；无 Word 或失败时回退内置转换 */
 const wordToPdf = async (): Promise<void> => {
-  const buffer = await readFileBuffer(sourcePath.value)
-  const { value: html } = await mammoth.convertToHtml({ arrayBuffer: buffer })
-  const blob = await htmlToPdfBlob(html)
   const name = sourcePath.value
     .split(/[\\/]/)
     .pop()!
     .replace(/\.docx$/i, '')
-  await saveBase64File(
-    `${name}.pdf`,
-    [{ name: 'PDF 文档', extensions: ['pdf'] }],
-    await blobToBase64(blob)
-  )
+
+  const savePath = await toolboxFile.selectSavePath(`${name}.pdf`, [
+    { name: 'PDF 文档', extensions: ['pdf'] }
+  ])
+  if (!savePath) return
+
+  const result = await toolboxFile.officeConvert({
+    inputPath: sourcePath.value,
+    outputPath: savePath
+  })
+  if (result.success) {
+    resultMessage.value = `已保存到：${savePath}（转换引擎：${result.engine}）`
+    ElMessage.success('转换完成')
+    return
+  }
+
+  // 回退：内置转换（无格式保真能力）
+  ElMessage.info(result.message || 'Word 转换不可用，将使用内置转换')
+  const buffer = await readFileBuffer(sourcePath.value)
+  const { value: html } = await mammoth.convertToHtml({ arrayBuffer: buffer })
+  const blob = await htmlToPdfBlob(html)
+  await saveToChosenPath(savePath, await blobToBase64(blob))
 }
 
 /** 图片 → PDF：按图片原始比例铺满 A4 宽度 */
@@ -296,8 +317,30 @@ const loadPdf = async (): Promise<pdfjsLib.PDFDocumentProxy> => {
   return pdfjsLib.getDocument({ data: buffer }).promise
 }
 
-/** PDF → Word：提取文本生成 Word 兼容的 .doc（HTML 格式，Word 可直接打开） */
+/** PDF → Word：优先 Word 2013+ 保真转换（生成 .docx），无 Word 时提取文本生成 .doc */
 const pdfToWord = async (): Promise<void> => {
+  const name = sourcePath.value
+    .split(/[\\/]/)
+    .pop()!
+    .replace(/\.pdf$/i, '')
+
+  const savePath = await toolboxFile.selectSavePath(`${name}.docx`, [
+    { name: 'Word 文档', extensions: ['docx'] }
+  ])
+  if (!savePath) return
+
+  const result = await toolboxFile.officeConvert({
+    inputPath: sourcePath.value,
+    outputPath: savePath
+  })
+  if (result.success) {
+    resultMessage.value = `已保存到：${savePath}（转换引擎：${result.engine}）`
+    ElMessage.success('转换完成（保留原始格式）')
+    return
+  }
+
+  // 回退：内置转换（仅提取文本，无排版）
+  ElMessage.info(result.message || 'Word 转换不可用，将使用内置转换')
   const pdf = await loadPdf()
   const paragraphs: string[] = []
   for (let i = 1; i <= pdf.numPages; i++) {
@@ -326,15 +369,7 @@ const pdfToWord = async (): Promise<void> => {
     paragraphs.map((p) => `<p>${escapeHtml(p) || '&nbsp;'}</p>`).join('') +
     '</body></html>'
 
-  const name = sourcePath.value
-    .split(/[\\/]/)
-    .pop()!
-    .replace(/\.pdf$/i, '')
-  await saveBase64File(
-    `${name}.doc`,
-    [{ name: 'Word 文档', extensions: ['doc'] }],
-    btoa(unescape(encodeURIComponent(html)))
-  )
+  await saveToChosenPath(savePath, btoa(unescape(encodeURIComponent(html))))
 }
 
 /** PDF → 图片：逐页渲染 PNG，多页打包 zip */
@@ -441,7 +476,7 @@ const startConvert = async (): Promise<void> => {
     <!-- 顶栏 -->
     <header class="doc-header">
       <div class="doc-header-left">
-        <BackHome />
+        <BackHome to="Toolbox" />
         <div class="doc-header-brand">
           <div class="doc-header-badge">
             <img :src="docConvSvg" alt="文档转换" class="doc-header-icon" />
@@ -509,8 +544,9 @@ const startConvert = async (): Promise<void> => {
       <!-- 功能说明 -->
       <div class="doc-tips">
         <el-alert type="info" :closable="false">
-          <p>· Word / 图片 / TXT / HTML 转 PDF：自动分页，支持中文字符渲染</p>
-          <p>· PDF 转 Word：提取文本内容生成 Word 兼容文档（扫描件无文字层时不适用）</p>
+          <p>· Word ↔ PDF：检测到本机 Microsoft Word 时高保真转换，完整保留格式</p>
+          <p>· 未安装 Word 时自动回退内置转换（仅保留内容，丢失排版）</p>
+          <p>· PDF 转 Word：扫描件无文字层时需要 Word 2013+ 才能识别</p>
           <p>· PDF 转图片：逐页渲染为 PNG，多页时自动打包为 ZIP 压缩包</p>
         </el-alert>
       </div>
@@ -554,16 +590,14 @@ const startConvert = async (): Promise<void> => {
   width: 36px;
   height: 36px;
   border-radius: 10px;
-  background: var(--color-warning);
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 4px 12px color-mix(in srgb, var(--color-warning) 35%, transparent);
 }
 
 .doc-header-icon {
-  width: 20px;
-  height: 20px;
+  width: 25px;
+  height: 25px;
 }
 
 .doc-header-title {

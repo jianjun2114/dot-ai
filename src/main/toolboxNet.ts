@@ -4,12 +4,10 @@
  * 在主进程代理网络请求，避免渲染进程 CORS 限制：
  * - HTTP：支持 GET/POST/PUT/DELETE/PATCH，JSON/表单/原始文本请求体，SSE 流式响应
  * - WebSocket：连接/发送/关闭，消息以事件推送给渲染进程
- * - TCP：原始 socket 连接，发送文本数据，收发以事件推送
  */
 import { ipcMain, BrowserWindow } from 'electron'
 import http from 'http'
 import https from 'https'
-import net from 'net'
 import { URL } from 'url'
 
 /** 请求体类型 */
@@ -62,9 +60,8 @@ const contentTypeFor = (bodyType: HttpBodyType = 'json'): string => {
   }
 }
 
-/** 创建 WebSocket / TCP 连接注册表（key 为连接 ID） */
+/** 创建 WebSocket 连接注册表（key 为连接 ID） */
 const wsConnections = new Map<string, WebSocket>()
-const tcpConnections = new Map<string, net.Socket>()
 
 /** 注册接口测试相关的所有 IPC 处理器 */
 export function registerToolboxNetIpc(): void {
@@ -177,11 +174,30 @@ export function registerToolboxNetIpc(): void {
         broadcast('tb:ws-event', { connId: options.connId, type: 'open' })
         resolve({ success: true })
       }
-      ws.onmessage = (ev: MessageEvent) => {
+      ws.onmessage = async (ev: MessageEvent) => {
+        // 统一解码为文本：Spring STOMP 可能以二进制帧发送（ArrayBuffer/Blob），心跳帧为 '\n'
+        const d = ev.data as unknown
+        let text: string
+        if (typeof d === 'string') {
+          text = d
+        } else if (d instanceof ArrayBuffer) {
+          text = Buffer.from(d).toString('utf-8')
+        } else if (ArrayBuffer.isView(d)) {
+          text = Buffer.from(d.buffer, d.byteOffset, d.byteLength).toString('utf-8')
+        } else if (typeof Blob !== 'undefined' && d instanceof Blob) {
+          text = await d.text()
+        } else {
+          text = String(d ?? '')
+        }
+        // 调试日志：打印每一帧原始内容（类型 + 长度 + 前 500 字符）
+        console.log(
+          `[tb-ws][recv][${options.connId}] type=${typeof d} len=${text.length}`,
+          JSON.stringify(text.slice(0, 500))
+        )
         broadcast('tb:ws-event', {
           connId: options.connId,
           type: 'message',
-          data: typeof ev.data === 'string' ? ev.data : '[二进制数据]'
+          data: text
         })
       }
       ws.onclose = () => {
@@ -208,59 +224,6 @@ export function registerToolboxNetIpc(): void {
   // 关闭 WebSocket 连接
   ipcMain.handle('tb:ws-close', (_event, options: { connId: string }) => {
     wsConnections.get(options.connId)?.close()
-    return { success: true }
-  })
-
-  // ==================== TCP ====================
-
-  // 建立 TCP 连接
-  ipcMain.handle(
-    'tb:tcp-connect',
-    async (_event, options: { connId: string; host: string; port: number }) => {
-      if (tcpConnections.has(options.connId)) {
-        throw new Error('连接 ID 已存在')
-      }
-
-      return new Promise((resolve, reject) => {
-        const socket = net.createConnection({ host: options.host, port: options.port })
-        tcpConnections.set(options.connId, socket)
-
-        socket.on('connect', () => {
-          broadcast('tb:tcp-event', { connId: options.connId, type: 'open' })
-          resolve({ success: true })
-        })
-        socket.on('data', (data: Buffer) => {
-          broadcast('tb:tcp-event', {
-            connId: options.connId,
-            type: 'data',
-            data: data.toString('utf-8')
-          })
-        })
-        socket.on('close', () => {
-          tcpConnections.delete(options.connId)
-          broadcast('tb:tcp-event', { connId: options.connId, type: 'close' })
-        })
-        socket.on('error', (err: Error) => {
-          broadcast('tb:tcp-event', { connId: options.connId, type: 'error', data: err.message })
-          reject(err)
-        })
-      })
-    }
-  )
-
-  // 发送 TCP 数据
-  ipcMain.handle('tb:tcp-send', (_event, options: { connId: string; data: string }) => {
-    const socket = tcpConnections.get(options.connId)
-    if (!socket || socket.destroyed) {
-      throw new Error('TCP 连接已断开')
-    }
-    socket.write(options.data)
-    return { success: true }
-  })
-
-  // 关闭 TCP 连接
-  ipcMain.handle('tb:tcp-close', (_event, options: { connId: string }) => {
-    tcpConnections.get(options.connId)?.destroy()
     return { success: true }
   })
 }

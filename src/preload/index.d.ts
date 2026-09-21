@@ -14,16 +14,50 @@ interface FileFilter {
   extensions: string[]
 }
 
+/** 数据库类型 */
+type DbKind = 'mysql' | 'oceanbase-mysql' | 'pgsql' | 'oracle' | 'oceanbase-oracle'
+
+/** 数据库连接配置 */
+interface DbConfig {
+  kind: DbKind
+  host: string
+  port: number
+  user: string
+  password: string
+  database?: string
+  serviceName?: string
+  sid?: string
+  ssl?: boolean
+}
+
+/** 数据库字段元信息 */
+interface DbColumnInfo {
+  name: string
+  dataType: string
+  nullable: boolean
+  pk: boolean
+  comment?: string
+}
+
+/** 数据库查询结果 */
+interface DbQueryResult {
+  columns: string[]
+  rows: Record<string, unknown>[]
+  affectedRows: number
+  insertId?: string
+  truncated: boolean
+}
+
 /** 百宝箱 API 类型定义 */
 export interface ToolboxApi {
   /** 打开独立 Shell 窗口 */
   openShellWindow: () => Promise<{ success: boolean }>
   /** 打开独立浏览器窗口 */
   openBrowserWindow: () => Promise<{ success: boolean }>
+  /** 打开独立数据库窗口（最大化全屏） */
+  openDatabaseWindow: () => Promise<{ success: boolean }>
   /** webview 内新窗口事件：页面尝试打开新链接（target=_blank / window.open） */
-  onWebviewNewWindow: (
-    callback: (payload: { openerId: number; url: string }) => void
-  ) => () => void
+  onWebviewNewWindow: (callback: (payload: { openerId: number; url: string }) => void) => () => void
   /** 用系统默认浏览器打开链接 */
   openExternal: (url: string) => Promise<{ success: boolean; message?: string }>
   /** 测试 SSH 连接（连通后立即断开，不创建会话） */
@@ -99,18 +133,68 @@ export interface ToolboxApi {
     onWsEvent: (
       callback: (payload: { connId: string; type: string; data?: string }) => void
     ) => () => void
-    tcpConnect: (connId: string, host: string, port: number) => Promise<{ success: boolean }>
-    tcpSend: (connId: string, data: string) => Promise<{ success: boolean }>
-    tcpClose: (connId: string) => Promise<{ success: boolean }>
-    onTcpEvent: (
-      callback: (payload: { connId: string; type: string; data?: string }) => void
-    ) => () => void
+  }
+
+  db: {
+    test: (config: DbConfig) => Promise<{ success: boolean; message: string }>
+    connect: (config: DbConfig) => Promise<{
+      connId: string
+      kind: string
+      currentDatabase?: string
+      currentSchema?: string
+    }>
+    disconnect: (connId: string) => Promise<{ success: boolean }>
+    catalog: (
+      connId: string,
+      scope: 'databases' | 'schemas' | 'tables' | 'columns' | 'sequences' | 'procedures',
+      parent?: { database?: string; schema?: string; table?: string }
+    ) => Promise<Array<{ name: string; type?: string }> | DbColumnInfo[]>
+    query: (
+      connId: string,
+      sql: string,
+      queryId?: string,
+      database?: string
+    ) => Promise<DbQueryResult>
+    cancel: (queryId: string) => Promise<{ success: boolean; message?: string }>
+    page: (params: {
+      connId: string
+      database?: string
+      schema?: string
+      table: string
+      page: number
+      pageSize: number
+    }) => Promise<DbQueryResult & { total: number }>
+    modify: (params: {
+      connId: string
+      database?: string
+      schema?: string
+      table: string
+      action: 'insert' | 'update' | 'delete'
+      primaryKey: { name: string; value: unknown }[]
+      changes: { name: string; value: unknown }[]
+    }) => Promise<{ affectedRows: number }>
+    alterColumn: (params: {
+      connId: string
+      database?: string
+      schema?: string
+      table: string
+      oldName: string
+      newName?: string
+      dataType: string
+      nullable: boolean
+      wasNullable?: boolean
+      comment?: string
+    }) => Promise<{ executed: string[] }>
   }
 
   file: {
     select: (filters?: FileFilter[]) => Promise<string | null>
     selectSavePath: (defaultName: string, filters?: FileFilter[]) => Promise<string | null>
     save: (path: string, dataBase64: string) => Promise<{ success: boolean }>
+    officeConvert: (options: {
+      inputPath: string
+      outputPath: string
+    }) => Promise<{ success: boolean; engine?: string; message?: string }>
   }
 }
 
@@ -138,10 +222,13 @@ declare global {
         method: 'GET' | 'POST' | 'PUT' | 'DELETE',
         path: string,
         body?: string,
-        headers?: Record<string, string>
+        headers?: Record<string, string>,
+        bodyBase64?: string,
+        binary?: boolean
       ) => Promise<{
         status: number
         data: string
+        dataBase64?: string
         headers: Record<string, string | string[] | undefined>
       }>
       executeCommand: (

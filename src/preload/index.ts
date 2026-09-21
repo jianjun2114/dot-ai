@@ -1,6 +1,31 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
+/** 数据库类型（MySQL / OceanBase MySQL 租户 / PostgreSQL / Oracle / OceanBase Oracle 租户） */
+export type DbKind = 'mysql' | 'oceanbase-mysql' | 'pgsql' | 'oracle' | 'oceanbase-oracle'
+
+/** 数据库连接配置 */
+export interface DbConfig {
+  kind: DbKind
+  host: string
+  port: number
+  user: string
+  password: string
+  database?: string
+  serviceName?: string
+  sid?: string
+  ssl?: boolean
+}
+
+/** 数据库字段元信息 */
+export interface DbColumnInfo {
+  name: string
+  dataType: string
+  nullable: boolean
+  pk: boolean
+  comment?: string
+}
+
 /** 通用 IPC 事件监听器封装 */
 const on = (channel: string, callback: (payload: unknown) => void): (() => void) => {
   const listener = (_event: IpcRendererEvent, payload: unknown): void => callback(payload)
@@ -17,6 +42,10 @@ const toolbox = {
   /** 打开独立浏览器窗口 */
   openBrowserWindow: (): Promise<{ success: boolean }> =>
     ipcRenderer.invoke('tb:open-browser-window'),
+
+  /** 打开独立数据库窗口（最大化全屏） */
+  openDatabaseWindow: (): Promise<{ success: boolean }> =>
+    ipcRenderer.invoke('tb:open-database-window'),
 
   /** webview 内新窗口事件：页面尝试打开新链接（target=_blank / window.open） */
   onWebviewNewWindow: (
@@ -163,24 +192,96 @@ const toolbox = {
     /** WebSocket 连接事件（open/message/close/error） */
     onWsEvent: (
       callback: (payload: { connId: string; type: string; data?: string }) => void
-    ): (() => void) => on('tb:ws-event', callback as (payload: unknown) => void),
+    ): (() => void) => on('tb:ws-event', callback as (payload: unknown) => void)
+  },
 
-    /** 建立 TCP 连接 */
-    tcpConnect: (connId: string, host: string, port: number): Promise<{ success: boolean }> =>
-      ipcRenderer.invoke('tb:tcp-connect', { connId, host, port }),
+  // ---------- 数据库管理 ----------
+  db: {
+    /** 测试连接（连通后立即断开）；深拷贝以剥离 Vue 响应式 Proxy（IPC 无法结构化克隆） */
+    test: (config: DbConfig): Promise<{ success: boolean; message: string }> =>
+      ipcRenderer.invoke('tb:db-test', JSON.parse(JSON.stringify(config))),
 
-    /** 发送 TCP 数据 */
-    tcpSend: (connId: string, data: string): Promise<{ success: boolean }> =>
-      ipcRenderer.invoke('tb:tcp-send', { connId, data }),
+    /** 建立连接，返回会话 ID 与当前库/Schema */
+    connect: (
+      config: DbConfig
+    ): Promise<{
+      connId: string
+      kind: string
+      currentDatabase?: string
+      currentSchema?: string
+    }> => ipcRenderer.invoke('tb:db-connect', JSON.parse(JSON.stringify(config))),
 
-    /** 关闭 TCP 连接 */
-    tcpClose: (connId: string): Promise<{ success: boolean }> =>
-      ipcRenderer.invoke('tb:tcp-close', { connId }),
+    /** 关闭连接 */
+    disconnect: (connId: string): Promise<{ success: boolean }> =>
+      ipcRenderer.invoke('tb:db-disconnect', connId),
 
-    /** TCP 连接事件（open/data/close/error） */
-    onTcpEvent: (
-      callback: (payload: { connId: string; type: string; data?: string }) => void
-    ): (() => void) => on('tb:tcp-event', callback as (payload: unknown) => void)
+    /** 浏览目录：databases / schemas / tables / columns / sequences / procedures */
+    catalog: (
+      connId: string,
+      scope: 'databases' | 'schemas' | 'tables' | 'columns' | 'sequences' | 'procedures',
+      parent?: { database?: string; schema?: string; table?: string }
+    ): Promise<Array<{ name: string; type?: string }> | DbColumnInfo[]> =>
+      ipcRenderer.invoke('tb:db-catalog', { connId, scope, parent }),
+
+    /** 执行任意 SQL（查询最多返回 1000 行）；queryId 用于取消，database 切换当前库 */
+    query: (
+      connId: string,
+      sql: string,
+      queryId?: string,
+      database?: string
+    ): Promise<{
+      columns: string[]
+      rows: Record<string, unknown>[]
+      affectedRows: number
+      insertId?: string
+      truncated: boolean
+    }> => ipcRenderer.invoke('tb:db-query', { connId, sql, queryId, database }),
+
+    /** 取消正在执行的查询 */
+    cancel: (queryId: string): Promise<{ success: boolean; message?: string }> =>
+      ipcRenderer.invoke('tb:db-cancel', queryId),
+
+    /** 分页查询表数据 */
+    page: (params: {
+      connId: string
+      database?: string
+      schema?: string
+      table: string
+      page: number
+      pageSize: number
+    }): Promise<{
+      columns: string[]
+      rows: Record<string, unknown>[]
+      affectedRows: number
+      truncated: boolean
+      total: number
+    }> => ipcRenderer.invoke('tb:db-page', params),
+
+    /** 行增删改 */
+    modify: (params: {
+      connId: string
+      database?: string
+      schema?: string
+      table: string
+      action: 'insert' | 'update' | 'delete'
+      primaryKey: { name: string; value: unknown }[]
+      changes: { name: string; value: unknown }[]
+    }): Promise<{ affectedRows: number }> => ipcRenderer.invoke('tb:db-modify', params),
+
+    /** 修改表字段（名称/类型/可空/注释）；深拷贝剥离 Vue 响应式 Proxy */
+    alterColumn: (params: {
+      connId: string
+      database?: string
+      schema?: string
+      table: string
+      oldName: string
+      newName?: string
+      dataType: string
+      nullable: boolean
+      wasNullable?: boolean
+      comment?: string
+    }): Promise<{ executed: string[] }> =>
+      ipcRenderer.invoke('tb:db-alter-column', JSON.parse(JSON.stringify(params)))
   },
 
   // ---------- 文件对话框（文档转换等） ----------
@@ -198,7 +299,14 @@ const toolbox = {
 
     /** 保存文件（base64 内容，支持二进制） */
     save: (path: string, dataBase64: string): Promise<{ success: boolean }> =>
-      ipcRenderer.invoke('tb:save-file', { path, dataBase64 })
+      ipcRenderer.invoke('tb:save-file', { path, dataBase64 }),
+
+    /** Office 高保真转换（word→pdf / pdf→word，使用本机 Microsoft Word） */
+    officeConvert: (options: {
+      inputPath: string
+      outputPath: string
+    }): Promise<{ success: boolean; engine?: string; message?: string }> =>
+      ipcRenderer.invoke('tb:office-convert', options)
   }
 }
 
@@ -225,9 +333,15 @@ const dotApi = {
     method: 'GET' | 'POST' | 'PUT' | 'DELETE',
     path: string,
     body?: string,
-    headers?: Record<string, string>
-  ): Promise<{ status: number; data: string }> =>
-    ipcRenderer.invoke('http-request', { method, path, body, headers }),
+    headers?: Record<string, string>,
+    bodyBase64?: string,
+    binary?: boolean
+  ): Promise<{
+    status: number
+    data: string
+    dataBase64?: string
+    headers: Record<string, string | string[] | undefined>
+  }> => ipcRenderer.invoke('http-request', { method, path, body, headers, bodyBase64, binary }),
   executeCommand: (
     command: string,
     timeout?: number,

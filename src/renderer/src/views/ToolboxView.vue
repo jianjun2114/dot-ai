@@ -6,6 +6,8 @@ import shellSvg from '../assets/shell.svg'
 import liulanqiSvg from '../assets/liulanqi.svg'
 import apiTestSvg from '../assets/api_test.svg'
 import docConvSvg from '../assets/doc_conv.svg'
+import editDocSvg from '../assets/edit_doc.svg'
+import dbSvg from '../assets/db.svg'
 
 const router = useRouter()
 const route = useRoute()
@@ -35,6 +37,27 @@ const features = [
     }
   },
   {
+    key: 'database',
+    title: '数据库',
+    desc: '连接 MySQL、Oracle、OceanBase、PostgreSQL，查询与编辑表数据',
+    icon: dbSvg,
+    accent: 'var(--color-primary)',
+    handler: (): void => {
+      // 数据库在独立全屏窗口中打开
+      void window.dot.toolbox.openDatabaseWindow()
+    }
+  },
+  {
+    key: 'api',
+    title: '接口测试',
+    desc: 'HTTP / WebSocket 请求测试，支持 JSON、表单与 SSE 流式响应',
+    icon: apiTestSvg,
+    accent: 'var(--color-success)',
+    handler: (): void => {
+      router.push({ name: 'ToolboxApi' })
+    }
+  },
+  {
     key: 'browser',
     title: '浏览器',
     desc: '多标签网页浏览，支持在本地浏览器打开，AI 仿人工自动化操作网页',
@@ -42,16 +65,6 @@ const features = [
     accent: 'var(--color-success)',
     handler: (): void => {
       window.dot.toolbox.openBrowserWindow()
-    }
-  },
-  {
-    key: 'api',
-    title: '接口测试',
-    desc: 'HTTP / WebSocket / TCP 请求测试，支持 JSON、表单与 SSE 流式响应',
-    icon: apiTestSvg,
-    accent: 'var(--color-warning)',
-    handler: (): void => {
-      router.push({ name: 'ToolboxApi' })
     }
   },
   {
@@ -63,14 +76,25 @@ const features = [
     handler: (): void => {
       router.push({ name: 'ToolboxDoc' })
     }
+  },
+  {
+    key: 'doc-edit',
+    title: '文档编辑',
+    desc: '在线编辑 Word、Excel、PPT 与图片，支持打开本地文件并导出保存',
+    icon: editDocSvg,
+    accent: 'var(--color-danger)',
+    handler: (): void => {
+      // 文档编辑在当前窗口内以子路由跳转
+      router.push({ name: 'ToolboxDocEdit' })
+    }
   }
 ]
 </script>
 
 <template>
   <div class="toolbox-page">
-    <!-- 顶栏：返回首页 + 标题 -->
-    <header class="toolbox-header">
+    <!-- 顶栏：仅在百宝箱入口页展示（子页面自带顶栏，避免双重头部） -->
+    <header v-if="isEntry" class="toolbox-header">
       <div class="toolbox-header-left">
         <button class="back-btn" @click="goHome">
           <el-icon :size="16"><ArrowLeft /></el-icon>
@@ -81,7 +105,7 @@ const features = [
       <span class="toolbox-subtitle">常用开发工具集合</span>
     </header>
 
-    <!-- 子功能页面（浏览器 / 接口测试 / 文档转换） -->
+    <!-- 子功能页面（接口测试 / 文档转换 / 文档编辑） -->
     <main v-if="!isEntry" class="toolbox-child">
       <router-view />
     </main>
