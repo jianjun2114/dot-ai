@@ -16,7 +16,15 @@
  *   - 助手 → 页面：模型通过页面工具操作页面；代码块「执行」按钮调用 executeCommand
  */
 import { ref, computed, nextTick, reactive } from 'vue'
-import { MagicStick, Promotion, Refresh, VideoPause, Lightning } from '@element-plus/icons-vue'
+import {
+  MagicStick,
+  Promotion,
+  Refresh,
+  VideoPause,
+  Lightning,
+  Plus,
+  UploadFilled
+} from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import {
   AI_SCENE_LABELS,
@@ -26,8 +34,11 @@ import {
   type AiTool
 } from '../composables/prompt'
 import { aiLocalTools } from '../composables/aiLocalTool'
-import { sendLlmStream, type LlmChatMessage } from '../utils/aiRequest'
-import AssistantMessage from './AssistantMessage.vue'
+import { useSettings } from '../composables/useSettings'
+import { parseMcpEntries, listMcpTools, callMcpTool } from '../utils/mcpClient'
+import { sendLlmStream, type LlmChatMessage, type LlmStreamChunk } from '../utils/aiRequest'
+import AssistantMessage, { type LongTaskData, type LongTaskStep } from './AssistantMessage.vue'
+import AiTaskPanel, { type AiTask } from './AiTaskPanel.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -195,8 +206,11 @@ const parseToolCalls = (content: string): { name: string; args: Record<string, u
   return calls
 }
 
-/** 工具调用最大轮数，防止模型死循环 */
+/** 工具调用最大轮数，防止模型死循环（任务子任务可传更大的值） */
 const MAX_TOOL_ROUNDS = 10
+
+/** 同一「工具 + 参数」允许的最大执行次数，超过后不再执行并回传警告 */
+const MAX_IDENTICAL_CALLS = 2
 
 /** 创建中止异常（name 为 AbortError，调用方可据此静默处理） */
 const abortError = (): DOMException => new DOMException('已停止生成', 'AbortError')
@@ -215,23 +229,34 @@ const stripThink = (content: string): string =>
  * 由 AssistantMessage 解析渲染，展示丝滑无气泡合并跳变。
  * @param chat 发给模型的完整消息（会被就地追加 assistant / user 消息）
  * @param signal 取消信号：中止后停止本轮请求 / 工具执行，气泡内追加「已停止生成」
+ * @param opts.sink 展示气泡的目标数组（默认对话消息列表；任务模式写入任务日志）
+ * @param opts.tools 本次循环可用的工具（默认当前场景全部工具；任务模式用任务选中的工具）
+ * @param opts.maxRounds 本循环工具调用轮数上限（默认 MAX_TOOL_ROUNDS；长任务子任务可调大）
  * @returns 最终回答正文（供调用方写入多轮对话历史）；中止时返回空字符串
  */
-const runAgentLoop = async (chat: LlmChatMessage[], signal?: AbortSignal): Promise<string> => {
-  const byName = new Map(allTools.value.map((t) => [t.name, t]))
+const runAgentLoop = async (
+  chat: LlmChatMessage[],
+  signal?: AbortSignal,
+  opts?: { sink?: AiMessage[]; tools?: AiTool[]; maxRounds?: number }
+): Promise<string> => {
+  const sink = opts?.sink ?? messages.value
+  const byName = new Map((opts?.tools ?? allTools.value).map((t) => [t.name, t]))
+  const maxRounds = opts?.maxRounds ?? MAX_TOOL_ROUNDS
+  /** 已执行的「工具+参数」签名计数：识别并阻断重复调用 */
+  const callCounts = new Map<string, number>()
 
   // 本回合唯一的回答气泡：content 为结构化流（think 块 / 工具标记 / Markdown）
   const msg = reactive<AiMessage>({ role: 'assistant', content: '' })
-  messages.value.push(msg)
+  sink.push(msg)
   /** 段落分隔：避免标记与前文粘连 */
   const append = (text: string): void => {
     if (msg.content && !msg.content.endsWith('\n')) msg.content += '\n'
     msg.content += text
-    scrollToBottom()
+    if (sink === messages.value) scrollToBottom()
   }
 
   try {
-    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    for (let round = 0; round < maxRounds; round++) {
       if (signal?.aborted) throw abortError()
       // ---- 本轮流处理：think 标签原样保留 + tool_call JSON 抑制 ----
       let raw = '' // 原始累计正文（含 <think> 标签，think 由 AssistantMessage 解析折叠）
@@ -295,20 +320,37 @@ const runAgentLoop = async (chat: LlmChatMessage[], signal?: AbortSignal): Promi
         }
       }
 
-      const result = await sendLlmStream(chat, {
-        signal,
-        think: deepThink.value,
-        onReasoning: (delta) => {
-          // 原生思考通道（reasoning_content / thinking）：包成 think 块进入展示流
+      // 统一帧处理（onChunk）：思考帧包成 think 块进入展示流（仅深度思考开启时展示），
+      // 正文帧经 tool_call 抑制缓冲写入
+      const onChunk = (chunk: LlmStreamChunk): void => {
+        if (chunk.reasoning_content && deepThink.value) {
           if (!nativeThinkOpen) {
             append('<think>')
             nativeThinkOpen = true
           }
-          msg.content += delta
+          msg.content += chunk.reasoning_content
           scrollToBottom()
-        },
-        onContent: handleContent
-      })
+        }
+        if (chunk.content) handleContent(chunk.content)
+      }
+
+      // 流式请求：网络抖动 / 空闲超时等非中止异常自动重试一次
+      let result
+      try {
+        result = await sendLlmStream(chat, {
+          signal,
+          think: deepThink.value,
+          onChunk
+        })
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') throw err
+        append(`\n> ⚠ 请求异常（${err instanceof Error ? err.message : String(err)}），自动重试…\n`)
+        result = await sendLlmStream(chat, {
+          signal,
+          think: deepThink.value,
+          onChunk
+        })
+      }
 
       // 流结束冲洗：未闭合的 think 块补上闭合标签，残余正文按常规处理
       if (nativeThinkOpen) {
@@ -335,7 +377,15 @@ const runAgentLoop = async (chat: LlmChatMessage[], signal?: AbortSignal): Promi
         const tool = byName.get(call.name)
         let output: string
         append(`TOOL_CALL: ${call.name}`)
-        if (!tool) {
+        // 重复调用防护：同一「工具+参数」超过上限不再执行，回传警告让模型换方法
+        const sig = `${call.name}:${JSON.stringify(call.args ?? {})}`
+        const count = (callCounts.get(sig) ?? 0) + 1
+        callCounts.set(sig, count)
+        if (count > MAX_IDENTICAL_CALLS) {
+          output =
+            `检测到第 ${count} 次执行完全相同的调用（工具与参数均相同）。禁止继续重复：` +
+            '请更换参数、换用其他工具，或基于已有结果直接给出结论。'
+        } else if (!tool) {
           output = `未找到工具：${call.name}`
         } else {
           try {
@@ -459,6 +509,529 @@ const executeCode = (code: string, lang: string): void => {
   }
 }
 
+// ==================== 任务模式 ====================
+/** 面板模式：对话（原有）/ 任务（任务列表 + 执行日志） */
+const mode = ref<'chat' | 'task'>('chat')
+
+const { settings } = useSettings()
+
+/** 任务执行日志（写入 AiTaskPanel 的 logs，由 AssistantMessage 渲染） */
+const taskLogs = ref<AiMessage[]>([])
+
+const taskPanelRef = ref<InstanceType<typeof AiTaskPanel>>()
+
+/** 长任务展示状态（传入 AiTaskPanel → AssistantMessage 气泡渲染：步骤状态 + 详情 + 总结） */
+const longTask = ref<LongTaskData | null>(null)
+
+/** 步骤 id → longTask.steps 下标映射 */
+const longTaskIndex = new Map<string, number>()
+
+/** 更新长任务某步骤的状态 / 详情 */
+const setStepState = (id: string, patch: Partial<LongTaskStep>): void => {
+  const idx = longTaskIndex.get(id)
+  if (idx !== undefined && longTask.value) Object.assign(longTask.value.steps[idx], patch)
+}
+
+/** 组装任务可用的工具：选中的页面/内置工具 + 选中 MCP 服务的工具 */
+const buildTaskTools = async (task: AiTask): Promise<AiTool[]> => {
+  const byName = new Map(allTools.value.map((t) => [t.name, t]))
+  const tools: AiTool[] = []
+  for (const name of task.tools) {
+    const t = byName.get(name)
+    if (t) tools.push(t)
+  }
+  // MCP 工具：仅拉取任务选中的服务（单服务失败不阻断其余）
+  for (const id of task.mcps) {
+    const mcp = settings.value.mcpConfigs.find((m) => m.id === id)
+    if (!mcp) continue
+    try {
+      for (const e of parseMcpEntries(mcp.configJson).filter((x) => x.url)) {
+        const url = e.url as string
+        const list = await listMcpTools(url)
+        for (const tool of list) {
+          if (!tool.name) continue
+          tools.push({
+            // 同名工具以服务名前缀区分
+            name: tools.some((t) => t.name === tool.name) ? `${mcp.name}__${tool.name}` : tool.name,
+            description: `[MCP服务：${mcp.name}] ${tool.description}`,
+            parameters: (tool.inputSchema ?? {
+              type: 'object',
+              properties: {}
+            }) as AiTool['parameters'],
+            execute: (args) => callMcpTool(url, tool.name, args)
+          })
+        }
+      }
+    } catch {
+      /* 单个 MCP 服务不可用时跳过 */
+    }
+  }
+  return tools
+}
+
+// ==================== 任务编排（规划 → 依赖调度 → 校验 → 失败调整 → 总结） ====================
+
+/** 编排后的执行步骤 */
+interface TaskStep {
+  id: string
+  /** 步骤名 */
+  name: string
+  /** 给子任务 AI 的详细执行指令 */
+  instruction: string
+  /** 依赖的步骤 id（无依赖为空数组，可并行的步骤不互相依赖） */
+  depends: string[]
+  /** 阶段性验证标准（空则跳过校验），长任务的防跑偏节点 */
+  verify: string
+}
+
+/** 规划 JSON 解析重试上限 */
+const MAX_PLAN_ROUNDS = 3
+/** 单步骤重试上限 */
+const MAX_STEP_RETRIES = 2
+/** 调度波次上限（防死循环） */
+const MAX_WAVES = 30
+/** 回传给规划/校验/总结的步骤结果截断长度 */
+const STEP_RESULT_LIMIT = 1500
+
+const clip = (text: string, limit = STEP_RESULT_LIMIT): string =>
+  text.length > limit ? `${text.slice(0, limit)}\n…（已截断）` : text
+
+/** 工具型提问（规划 / 校验 / 决策 / 总结等编排交互）：
+ * 每次交互作为独立条目写入任务日志（think 块 + 回复正文），label 标识交互类型 */
+const askLlm = async (
+  system: string,
+  user: string,
+  signal?: AbortSignal,
+  label = 'AI 交互'
+): Promise<string> => {
+  if (signal?.aborted) throw abortError()
+  taskLogs.value.push({ role: 'user', content: `◇ ${label}` })
+  let think = ''
+  let out = ''
+  const msg = reactive<AiMessage>({ role: 'assistant', content: '' })
+  taskLogs.value.push(msg)
+  await sendLlmStream(
+    [
+      { role: 'system', content: system },
+      { role: 'user', content: user }
+    ],
+    {
+      signal,
+      think: deepThink.value,
+      onChunk: (chunk) => {
+        if (chunk.reasoning_content && deepThink.value) think += chunk.reasoning_content
+        if (chunk.content) out += chunk.content
+        msg.content = think ? `<think>${think}</think>\n${out}` : out
+      }
+    }
+  )
+  return out
+}
+
+/** 从模型回复中提取 JSON（容忍 markdown 代码块 / 前后缀文本）；
+ * 用 function 声明避免箭头函数泛型 <T> 被 eslint vue parser 误判为 JSX */
+function extractJson<T>(text: string): T | null {
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start === -1 || end <= start) return null
+  try {
+    return JSON.parse(text.slice(start, end + 1)) as T
+  } catch {
+    return null
+  }
+}
+
+/** 组装任务系统提示词（场景 + 任务信息 + 技能 + 工具协议） */
+const buildTaskSystem = (task: AiTask, tools: AiTool[]): string => {
+  const skillText = task.skills
+    .map((id) => settings.value.skillConfigs.find((s) => s.id === id))
+    .filter(Boolean)
+    .map((s) => `## 技能：${s!.name}\n${s!.prompt}`)
+    .join('\n\n')
+  const taskInfo = [
+    `# 当前执行的任务\n- 名称：${task.name}`,
+    task.description ? `- 描述：${task.description}` : '',
+    task.schedule ? `- 任务计划：\n${task.schedule}` : ''
+  ]
+    .filter(Boolean)
+    .join('\n')
+  return [
+    getSystemPrompt(props.scene, props.sceneExtra),
+    taskInfo,
+    skillText,
+    buildToolPrompt(tools)
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+/** 提示词约束生成计划 JSON，解析失败自动重试 */
+const requestPlan = async (
+  task: AiTask,
+  signal?: AbortSignal
+): Promise<{ goal: string; steps: TaskStep[] } | null> => {
+  const system =
+    '你是任务规划器。把任务按描述拆解为可执行步骤，只输出严格 JSON，不要输出任何其他内容。' +
+    'JSON 格式：{"goal":"任务目标一句话","steps":[{"id":"1","name":"步骤名","instruction":"给子AI的详细执行指令，含具体操作与预期产出","depends":[],"verify":"该步骤的验证标准"}]}' +
+    '\n约束：\n' +
+    '- 每个步骤都必须是可执行的具体操作：明确调用哪个工具 / 执行什么页面操作及其目标对象；禁止纯思考、纯分析类步骤，分析总结统一放最后一个步骤\n' +
+    '- depends 填依赖步骤的 id 数组，无依赖为空数组；无依赖的步骤可并行执行，禁止互相依赖\n' +
+    '- 有先后顺序的步骤必须用 depends 声明依赖\n' +
+    '- 长任务必须设置 verify 验证标准作为阶段性校验节点，防止执行跑偏\n' +
+    '- 每步 instruction 必须自包含（子 AI 看不到其他步骤的完整过程，只有依赖步骤的结果摘要）'
+  for (let i = 0; i < MAX_PLAN_ROUNDS; i++) {
+    const raw = await askLlm(
+      system,
+      `任务名称：${task.name}\n任务描述：${task.description || '无'}\n任务计划：${task.schedule || '无'}`,
+      signal,
+      `任务规划${i > 0 ? `（重试 ${i}）` : ''}`
+    )
+    const plan = extractJson<{ goal?: string; steps?: TaskStep[] }>(raw)
+    if (
+      plan?.goal &&
+      Array.isArray(plan.steps) &&
+      plan.steps.length > 0 &&
+      plan.steps.every((s) => s.id && s.name && s.instruction)
+    ) {
+      return {
+        goal: plan.goal,
+        steps: plan.steps.map((s) => ({
+          id: String(s.id),
+          name: s.name,
+          instruction: s.instruction,
+          depends: Array.isArray(s.depends) ? s.depends.map(String) : [],
+          verify: s.verify ?? ''
+        }))
+      }
+    }
+    taskLogs.value.push({
+      role: 'assistant',
+      content: `<think>计划 JSON 解析失败（第 ${i + 1} 次），已要求模型重新生成。</think>计划格式异常，正在重新生成…`
+    })
+  }
+  return null
+}
+
+/** 执行单个子任务（独立智能体循环，日志写入 taskLogs）；
+ * 依赖步骤的结果摘要一并注入子任务指令，保证子 AI 有足够上下文 */
+const runStep = async (
+  step: TaskStep,
+  system: string,
+  tools: AiTool[],
+  results: Map<string, string>,
+  signal?: AbortSignal
+): Promise<string> => {
+  taskLogs.value.push({ role: 'user', content: `▶ 子任务 ${step.id}：${step.name}` })
+  const depText = step.depends
+    .map((id) => {
+      const dep = results.get(id)
+      return dep ? `### 依赖步骤 ${id} 的结果摘要\n${clip(dep, 800)}` : ''
+    })
+    .filter(Boolean)
+    .join('\n\n')
+  const userMsg =
+    (tools.length
+      ? `【执行要求】本步骤必须通过调用工具实际执行操作完成，禁止只输出文字描述或分析。工具不足时在结果中说明缺失的工具。\n` +
+        `【效率要求】不要陷入长时间思考：每个思考块只做简短的下一步规划；禁止重复执行完全相同的调用，` +
+        `某命令无产出或失败时，更换方法并在思考中说明原因；信息充分立即给出结论。\n\n`
+      : '') +
+    step.instruction +
+    (depText ? `\n\n---\n${depText}` : '')
+  const reply = await runAgentLoop(
+    [
+      { role: 'system', content: system },
+      { role: 'user', content: userMsg }
+    ],
+    signal,
+    { sink: taskLogs.value, tools, maxRounds: 20 }
+  )
+  return reply
+}
+
+/** 步骤结果校验：verify 非空时让模型判定是否达标 */
+const verifyStep = async (
+  step: TaskStep,
+  result: string,
+  signal?: AbortSignal
+): Promise<{ pass: boolean; reason: string } | null> => {
+  if (!step.verify.trim()) return { pass: true, reason: '' }
+  for (let i = 0; i < MAX_PLAN_ROUNDS; i++) {
+    const raw = await askLlm(
+      '你是任务校验器。根据验证标准判断子任务结果是否达标，只输出严格 JSON：{"pass":true|false,"reason":"判断依据（简洁）"}，不要输出其他内容。',
+      `## 验证标准\n${step.verify}\n\n## 子任务执行结果\n${clip(result)}`,
+      signal,
+      `结果校验 · 子任务 ${step.id}`
+    )
+    const verdict = extractJson<{ pass?: boolean; reason?: string }>(raw)
+    if (verdict && typeof verdict.pass === 'boolean') {
+      return { pass: verdict.pass, reason: verdict.reason ?? '' }
+    }
+  }
+  return null // 校验器不可用时视为通过，不阻断主流程
+}
+
+/** 失败决策：重试 or 调整（只调整最小范围，避免全部计划重做） */
+const requestAdjust = async (
+  step: TaskStep,
+  result: string,
+  reason: string,
+  signal?: AbortSignal
+): Promise<{
+  action: 'retry' | 'adjust'
+  target: 'current' | 'prev' | 'next'
+  instruction: string
+  reason: string
+} | null> => {
+  const system =
+    '你是任务调度决策器。子任务未通过校验，请决策最小代价的恢复方案，只输出严格 JSON：' +
+    '{"action":"retry|adjust","target":"current|prev|next","instruction":"调整后的执行指令","reason":"决策理由"}\n' +
+    '决策规则：\n' +
+    '- 结果接近达标、疑似偶发失败 → action=retry 原样重试（instruction 留空）\n' +
+    '- 仅当前步骤指令有问题 → target=current，给出修正后的指令\n' +
+    '- 是上游依赖步骤产出有问题导致 → target=prev，给出上一步的修正指令（当前步骤会在其后重做）\n' +
+    '- 当前步骤结果可用但影响下一步 → target=next，给出下一步的修正指令\n' +
+    '- 严禁扩大调整范围：已成功的步骤不得重做，除非它确实是失败根因'
+  for (let i = 0; i < MAX_PLAN_ROUNDS; i++) {
+    const raw = await askLlm(
+      system,
+      `## 失败子任务\n${step.id}：${step.name}\n指令：${step.instruction}\n\n## 执行结果\n${clip(result, 800)}\n\n## 校验失败原因\n${reason}`,
+      signal,
+      `失败决策 · 子任务 ${step.id}`
+    )
+    const d = extractJson<{
+      action?: string
+      target?: string
+      instruction?: string
+      reason?: string
+    }>(raw)
+    const action = d?.action === 'adjust' ? 'adjust' : d?.action === 'retry' ? 'retry' : null
+    const target =
+      d?.target === 'prev'
+        ? 'prev'
+        : d?.target === 'next'
+          ? 'next'
+          : d?.target === 'current'
+            ? 'current'
+            : null
+    if (action && target) {
+      return { action, target, instruction: d?.instruction ?? '', reason: d?.reason ?? '' }
+    }
+  }
+  return null
+}
+
+/** 最终总结：目标对照 + 结果评估 + 建议 */
+const requestSummary = async (
+  task: AiTask,
+  goal: string,
+  steps: TaskStep[],
+  results: Map<string, string>,
+  signal?: AbortSignal
+): Promise<string> => {
+  const detail = steps
+    .map((s) => `### ${s.id}：${s.name}\n结果：${clip(results.get(s.id) ?? '', 600)}`)
+    .join('\n\n')
+  const raw = await askLlm(
+    '你是任务总结器。根据任务目标与各步骤结果输出最终中文总结（Markdown）：' +
+      '1) 是否符合目标预期（明确「已达成 / 部分达成 / 未达成」）；2) 各步骤结果简述；3) 发现的问题与后续建议。',
+    `## 任务目标\n${goal}\n\n## 任务描述\n${task.description || '无'}\n\n## 各步骤结果\n${detail}`,
+    signal,
+    '任务总结'
+  )
+  return raw.trim() || '任务已完成，但未生成总结。'
+}
+
+/** 执行任务（编排器）：
+ * 1. 规划：任务描述 → 依赖有序的步骤计划（JSON，解析失败自动重试）
+ * 2. 调度：按依赖波次执行，同波无依赖的子任务并行，统一等待后进入下一波
+ * 3. 校验：带 verify 的步骤（长任务校验节点）逐个判定，防跑偏
+ * 4. 调整：失败时模型决策重试 / 调整上一步 / 当前步 / 下一步，不做全量重做
+ * 5. 总结：完成后输出目标对照、问题与建议
+ */
+const executeTask = async (task: AiTask): Promise<void> => {
+  if (loading.value) return
+  loading.value = true
+  abortCtl = new AbortController()
+  const signal = abortCtl.signal
+  taskLogs.value.push({ role: 'user', content: `▶ 执行任务：${task.name}` })
+  longTask.value = null
+  longTaskIndex.clear()
+  try {
+    const tools = await buildTaskTools(task)
+    const system = buildTaskSystem(task, tools)
+
+    // ---- 1. 规划 ----
+    const plan = await requestPlan(task, signal)
+    if (!plan) {
+      taskLogs.value.push({
+        role: 'assistant',
+        content: '⚠ 任务规划失败：无法生成有效的步骤计划，任务终止。'
+      })
+      return
+    }
+    taskLogs.value.push({
+      role: 'assistant',
+      content: `**目标**：${plan.goal}\n\n**计划**（共 ${plan.steps.length} 步）：\n${plan.steps
+        .map(
+          (s) =>
+            `- ${s.id}. ${s.name}${s.depends.length ? `（依赖：${s.depends.join('、')}）` : ''}`
+        )
+        .join('\n')}`
+    })
+
+    // 初始化长任务展示：全部步骤进入等待状态（详情默认展示执行指令）
+    longTask.value = {
+      title: task.name,
+      steps: plan.steps.map((s) => ({
+        name: `${s.id}. ${s.name}`,
+        status: 'wait' as const,
+        detail: s.instruction
+      }))
+    }
+    plan.steps.forEach((s, i) => longTaskIndex.set(s.id, i))
+
+    const results = new Map<string, string>()
+    const retries = new Map<string, number>()
+    let adjustedNext: string | null = null // 调整波次内已改动过的步骤（防止循环调整）
+
+    // ---- 2~4. 调度执行 ----
+    for (let wave = 0; wave < MAX_WAVES; wave++) {
+      if (signal.aborted) throw abortError()
+      // 就绪集合：未完成 + 依赖全部完成；同波并行，波间按序等待
+      const ready = plan.steps.filter(
+        (s) => !results.has(s.id) && s.depends.every((d) => results.has(d))
+      )
+      if (ready.length === 0) break
+
+      // 并行执行本波子任务
+      const settled = await Promise.all(
+        ready.map(async (step) => {
+          setStepState(step.id, { status: 'running', detail: '执行中…' })
+          const reply = await runStep(step, system, tools, results, signal)
+          return { step, reply }
+        })
+      )
+      // 仅用户主动停止（signal 中止）才中断整个任务
+      if (signal.aborted) throw abortError()
+
+      // ---- 3. 逐个校验（波次统一等待后进行） ----
+      for (const { step, reply } of settled) {
+        if (signal.aborted) throw abortError()
+        // 空回复不算中止：作为校验失败进入重试/调整流程；校验器不可用（null）视为通过
+        const verdict =
+          (reply ? await verifyStep(step, reply, signal) : null) ??
+          (reply
+            ? { pass: true, reason: '' }
+            : { pass: false, reason: '子任务未返回任何内容（模型无输出）' })
+        if (verdict.pass) {
+          results.set(step.id, reply)
+          setStepState(step.id, { status: 'done', detail: clip(reply, 400) })
+          taskLogs.value.push({
+            role: 'assistant',
+            content: `✅ 子任务 ${step.id}「${step.name}」校验通过${verdict.reason ? `：${verdict.reason}` : ''}`
+          })
+          continue
+        }
+        setStepState(step.id, { status: 'error', detail: `校验未通过：${verdict.reason}` })
+        taskLogs.value.push({
+          role: 'assistant',
+          content: `❌ 子任务 ${step.id}「${step.name}」校验未通过：${verdict.reason}`
+        })
+        // ---- 4. 失败决策 ----
+        const retriesN = (retries.get(step.id) ?? 0) + 1
+        retries.set(step.id, retriesN)
+        if (retriesN > MAX_STEP_RETRIES) {
+          taskLogs.value.push({
+            role: 'assistant',
+            content: `⚠ 子任务 ${step.id} 重试次数已达上限，任务终止。请检查任务计划或手动处理。`
+          })
+          return
+        }
+        const decision = await requestAdjust(step, reply, verdict.reason, signal)
+        if (!decision) {
+          // 决策不可用时退化为原样重试
+          taskLogs.value.push({
+            role: 'assistant',
+            content: `↻ 子任务 ${step.id} 决策超限，按原样重试。`
+          })
+          continue
+        }
+        taskLogs.value.push({
+          role: 'assistant',
+          content: `**调整决策**：${decision.action === 'retry' ? '重试' : '调整'}「${
+            decision.target === 'prev' ? '上一步' : decision.target === 'next' ? '下一步' : '当前步'
+          }」 - ${decision.reason}`
+        })
+        if (decision.action === 'retry' || decision.target === 'current') {
+          if (decision.action === 'adjust' && decision.instruction.trim())
+            step.instruction = decision.instruction
+          // 不标记完成，下一波重新执行本步骤
+          setStepState(step.id, {
+            status: 'wait',
+            detail: `重试中：${decision.reason || '按原样重试'}`
+          })
+          continue
+        }
+        if (decision.target === 'prev') {
+          // 回退上一步：撤销其结果与依赖它的后续结果，仅重做受影响链
+          const order = plan.steps.map((s) => s.id)
+          const prevId = order[Math.max(0, order.indexOf(step.id) - 1)]
+          const prevStep = plan.steps.find((s) => s.id === prevId)
+          if (prevStep && decision.instruction.trim()) prevStep.instruction = decision.instruction
+          const affected = new Set([prevId])
+          for (const s of plan.steps) {
+            if (s.depends.some((d) => affected.has(d))) affected.add(s.id)
+          }
+          for (const id of affected) {
+            results.delete(id)
+            setStepState(id, { status: 'wait', detail: '待重做（受上游失败影响）' })
+          }
+          taskLogs.value.push({
+            role: 'assistant',
+            content: `↩ 回退重做：${[...affected].join('、')}（仅受影响的步骤，其余保留）`
+          })
+          continue
+        }
+        // target === next：调整下一步指令
+        const order = plan.steps.map((s) => s.id)
+        const nextStep = plan.steps[order.indexOf(step.id) + 1]
+        if (nextStep && decision.instruction.trim() && adjustedNext !== nextStep.id) {
+          nextStep.instruction = decision.instruction
+          adjustedNext = nextStep.id
+        }
+      }
+    }
+
+    // ---- 5. 总结 ----
+    const unfinished = plan.steps.filter((s) => !results.has(s.id))
+    if (unfinished.length > 0) {
+      for (const s of unfinished) setStepState(s.id, { status: 'error', detail: '未执行' })
+      taskLogs.value.push({
+        role: 'assistant',
+        content: `⚠ 以下步骤未完成：${unfinished.map((s) => `${s.id}.${s.name}`).join('、')}`
+      })
+    }
+    if (results.size > 0) {
+      const summary = await requestSummary(task, plan.goal, plan.steps, results, signal)
+      if (longTask.value) longTask.value.summary = summary
+      taskLogs.value.push({ role: 'assistant', content: `## 任务总结\n\n${summary}` })
+    }
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      // 停止时把执行中 / 等待中的步骤标记为报错（已停止）
+      for (const s of longTask.value?.steps ?? []) {
+        if (s.status !== 'done') Object.assign(s, { status: 'error', detail: '已停止' })
+      }
+      taskLogs.value.push({ role: 'assistant', content: '（任务已停止）' })
+    } else {
+      taskLogs.value.push({ role: 'assistant', content: `任务执行出错：${e}` })
+    }
+  } finally {
+    abortCtl = null
+    loading.value = false
+  }
+}
+
 // 暴露给宿主页面：页面内容 → AI 输入框 / 直接发送消息 / 气泡内确认
 defineExpose({ sendToInput, sendMessage, requestConfirm })
 </script>
@@ -477,80 +1050,130 @@ defineExpose({ sendToInput, sendMessage, requestConfirm })
     ></div>
 
     <div class="ai-body">
-      <!-- 头部：标题 + 场景徽标（标识当前接入的功能页面） -->
+      <!-- 头部：标题 + 模式切换 + 场景徽标（标识当前接入的功能页面） -->
       <div class="ai-header">
         <div class="ai-header-title">
           <el-icon><MagicStick /></el-icon>
           <span>{{ title }}</span>
+          <!-- 模式切换：对话 / 任务 -->
+          <div class="ai-mode-switch">
+            <span class="ai-mode-item" :class="{ active: mode === 'chat' }" @click="mode = 'chat'">
+              对话
+            </span>
+            <span class="ai-mode-item" :class="{ active: mode === 'task' }" @click="mode = 'task'">
+              任务
+            </span>
+          </div>
           <span class="ai-scene-badge">{{ sceneLabel }}</span>
         </div>
         <div class="ai-header-actions">
-          <el-tooltip :content="deepThink ? '深度思考已开启' : '深度思考已关闭'">
-            <el-button
-              :type="deepThink ? 'primary' : 'default'"
-              :icon="Lightning"
-              circle
-              size="small"
-              @click="deepThink = !deepThink"
+          <!-- 任务模式：右上角 + 新增任务 / 导入 JSON -->
+          <template v-if="mode === 'task'">
+            <el-tooltip content="导入任务 JSON">
+              <el-button
+                :icon="UploadFilled"
+                circle
+                size="small"
+                @click="taskPanelRef?.importFromFile()"
+              />
+            </el-tooltip>
+            <el-tooltip content="新增任务">
+              <el-button
+                type="primary"
+                :icon="Plus"
+                circle
+                size="small"
+                @click="taskPanelRef?.openDialog()"
+              />
+            </el-tooltip>
+          </template>
+          <template v-else>
+            <el-tooltip :content="deepThink ? '深度思考已开启' : '深度思考已关闭'">
+              <el-button
+                :type="deepThink ? 'primary' : 'default'"
+                :icon="Lightning"
+                circle
+                size="small"
+                @click="deepThink = !deepThink"
+              />
+            </el-tooltip>
+            <el-tooltip content="清空对话">
+              <el-button :icon="Refresh" circle size="small" @click="clearMessages" />
+            </el-tooltip>
+          </template>
+        </div>
+      </div>
+
+      <!-- 任务模式：任务列表 + 执行日志 -->
+      <AiTaskPanel
+        v-show="mode === 'task'"
+        ref="taskPanelRef"
+        :scene="scene"
+        :page-tools="tools ?? []"
+        :builtin-tools="builtinTools"
+        :logs="taskLogs"
+        :long-task="longTask"
+        :running="loading"
+        :think="deepThink"
+        @update:think="deepThink = $event"
+        @execute="executeTask"
+        @stop="stopGeneration"
+      />
+
+      <!-- 对话模式 -->
+      <template v-if="mode === 'chat'">
+        <!-- 消息列表 -->
+        <div ref="messageListRef" class="ai-messages">
+          <template v-for="(msg, idx) in messages" :key="idx">
+            <!-- 用户消息 -->
+            <div v-if="msg.role === 'user'" class="ai-message user">{{ msg.content }}</div>
+            <!-- AI 回复：AssistantMessage 气泡（content 结构化流：思考折叠 × N + 工具折叠 × N + Markdown） -->
+            <AssistantMessage
+              v-else
+              :content="msg.content"
+              :is-streaming="loading && idx === messages.length - 1"
+              :on-execute="executeCommand ? executeCode : undefined"
+              :execute-label="executeLabel"
+              :confirm="idx === messages.length - 1 ? confirmState : null"
+              :on-confirm-action="onConfirmAction"
             />
-          </el-tooltip>
-          <el-tooltip content="清空对话">
-            <el-button :icon="Refresh" circle size="small" @click="clearMessages" />
-          </el-tooltip>
+          </template>
         </div>
-      </div>
 
-      <!-- 消息列表 -->
-      <div ref="messageListRef" class="ai-messages">
-        <template v-for="(msg, idx) in messages" :key="idx">
-          <!-- 用户消息 -->
-          <div v-if="msg.role === 'user'" class="ai-message user">{{ msg.content }}</div>
-          <!-- AI 回复：AssistantMessage 气泡（content 结构化流：思考折叠 × N + 工具折叠 × N + Markdown） -->
-          <AssistantMessage
-            v-else
-            :content="msg.content"
-            :is-streaming="loading && idx === messages.length - 1"
-            :on-execute="executeCommand ? executeCode : undefined"
-            :execute-label="executeLabel"
-            :confirm="idx === messages.length - 1 ? confirmState : null"
-            :on-confirm-action="onConfirmAction"
-          />
-        </template>
-      </div>
-
-      <!-- 输入区 -->
-      <div class="ai-input-area">
-        <div class="ai-quick-actions">
-          <el-button size="small" :icon="MagicStick" @click="readContext">读取内容</el-button>
+        <!-- 输入区 -->
+        <div class="ai-input-area">
+          <div class="ai-quick-actions">
+            <el-button size="small" :icon="MagicStick" @click="readContext">读取内容</el-button>
+          </div>
+          <div class="ai-input-row">
+            <el-input
+              ref="inputRef"
+              v-model="input"
+              type="textarea"
+              :rows="2"
+              placeholder="输入问题，回车发送..."
+              resize="none"
+              @keydown.enter.exact.prevent="sendMessage()"
+            />
+            <!-- 生成中显示「停止」按钮，空闲时显示「发送」 -->
+            <el-button
+              v-if="loading"
+              type="warning"
+              :icon="VideoPause"
+              title="停止生成"
+              class="ai-send-btn"
+              @click="stopGeneration"
+            />
+            <el-button
+              v-else
+              type="primary"
+              :icon="Promotion"
+              class="ai-send-btn"
+              @click="sendMessage()"
+            />
+          </div>
         </div>
-        <div class="ai-input-row">
-          <el-input
-            ref="inputRef"
-            v-model="input"
-            type="textarea"
-            :rows="2"
-            placeholder="输入问题，回车发送..."
-            resize="none"
-            @keydown.enter.exact.prevent="sendMessage()"
-          />
-          <!-- 生成中显示「停止」按钮，空闲时显示「发送」 -->
-          <el-button
-            v-if="loading"
-            type="warning"
-            :icon="VideoPause"
-            title="停止生成"
-            class="ai-send-btn"
-            @click="stopGeneration"
-          />
-          <el-button
-            v-else
-            type="primary"
-            :icon="Promotion"
-            class="ai-send-btn"
-            @click="sendMessage()"
-          />
-        </div>
-      </div>
+      </template>
     </div>
   </div>
 </template>
@@ -634,6 +1257,30 @@ defineExpose({ sendToInput, sendMessage, requestConfirm })
   color: var(--color-primary);
   background: color-mix(in srgb, var(--color-primary) 12%, transparent);
   border-radius: 10px;
+}
+
+/* 模式切换：对话 / 任务 */
+.ai-mode-switch {
+  display: flex;
+  margin-left: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.ai-mode-item {
+  padding: 2px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary, #909399);
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.15s ease;
+}
+
+.ai-mode-item.active {
+  color: #ffffff;
+  background: var(--color-primary);
 }
 
 .ai-messages {

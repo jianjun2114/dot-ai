@@ -39,6 +39,15 @@ interface DbColumnInfo {
   comment?: string
 }
 
+/** 索引/约束元信息 */
+interface DbIndexInfo {
+  name: string
+  kind: 'INDEX' | 'UNIQUE' | 'FOREIGN'
+  columns: string
+  refTable?: string
+  refColumns?: string
+}
+
 /** 数据库查询结果 */
 interface DbQueryResult {
   columns: string[]
@@ -146,9 +155,16 @@ export interface ToolboxApi {
     disconnect: (connId: string) => Promise<{ success: boolean }>
     catalog: (
       connId: string,
-      scope: 'databases' | 'schemas' | 'tables' | 'columns' | 'sequences' | 'procedures',
+      scope:
+        | 'databases'
+        | 'schemas'
+        | 'tables'
+        | 'columns'
+        | 'sequences'
+        | 'procedures'
+        | 'indexes',
       parent?: { database?: string; schema?: string; table?: string }
-    ) => Promise<Array<{ name: string; type?: string }> | DbColumnInfo[]>
+    ) => Promise<Array<{ name: string; type?: string }> | DbColumnInfo[] | DbIndexInfo[]>
     query: (
       connId: string,
       sql: string,
@@ -214,7 +230,8 @@ declare global {
           | 'exists'
           | 'mkdir'
           | 'delete'
-          | 'read-base64',
+          | 'read-base64'
+          | 'write-base64',
         ...args: unknown[]
       ) => Promise<string | string[] | boolean | null>
       listFiles: (dir: string) => Promise<string[]>

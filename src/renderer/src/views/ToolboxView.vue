@@ -8,6 +8,7 @@ import apiTestSvg from '../assets/api_test.svg'
 import docConvSvg from '../assets/doc_conv.svg'
 import editDocSvg from '../assets/edit_doc.svg'
 import dbSvg from '../assets/db.svg'
+import drawingSvg from '../assets/ps_canvs.svg'
 
 const router = useRouter()
 const route = useRoute()
@@ -86,6 +87,16 @@ const features = [
     handler: (): void => {
       // 文档编辑在当前窗口内以子路由跳转
       router.push({ name: 'ToolboxDocEdit' })
+    }
+  },
+  {
+    key: 'drawing',
+    title: '画图',
+    desc: '基础绘图与图片编辑，背景切换、尺寸与分辨率调整，支持 AI 识别内容与生成图片',
+    icon: drawingSvg,
+    accent: 'var(--color-warning)',
+    handler: (): void => {
+      router.push({ name: 'ToolboxDrawing' })
     }
   }
 ]

@@ -27,7 +27,8 @@ import {
   Upload,
   Download,
   FolderAdd,
-  Star
+  Star,
+  Search
 } from '@element-plus/icons-vue'
 import TerminalPane from '../../components/toolbox/TerminalPane.vue'
 import AiAssistant from '../../components/AiAssistant.vue'
@@ -322,12 +323,24 @@ const deleteConnection = async (conn: SavedConnection): Promise<void> => {
 // ==================== 侧栏收起 ====================
 const sidebarCollapsed = ref(false)
 
-// ==================== 连接分类分组 ====================
+// ==================== 连接搜索与分类分组 ====================
+/** 连接搜索关键字：按名称或 IP（主机地址）模糊过滤 */
+const connSearch = ref('')
+
+/** 按关键字过滤后的连接列表（名称 / 主机地址任一命中即保留） */
+const filteredConnections = computed<SavedConnection[]>(() => {
+  const q = connSearch.value.trim().toLowerCase()
+  if (!q) return savedConnections.value
+  return savedConnections.value.filter(
+    (c) => c.name.toLowerCase().includes(q) || c.host.toLowerCase().includes(q)
+  )
+})
+
 /** 连接按分类分组：无分类的直接平铺，有分类的归入对应组（组内按名称排序） */
 const groupedConnections = computed(() => {
   const plain: SavedConnection[] = []
   const groups = new Map<string, SavedConnection[]>()
-  for (const c of savedConnections.value) {
+  for (const c of filteredConnections.value) {
     const cat = c.category?.trim()
     if (!cat) plain.push(c)
     else {
@@ -1083,6 +1096,17 @@ onMounted(loadConnections)
           </el-button>
         </div>
 
+        <!-- 连接搜索：按名称或 IP 过滤 -->
+        <div class="conn-search">
+          <el-input
+            v-model="connSearch"
+            placeholder="搜索名称或 IP"
+            clearable
+            :prefix-icon="Search"
+            size="small"
+          />
+        </div>
+
         <div class="conn-list">
           <!-- 已保存的远程连接：无分类的直接平铺，有分类的归入可折叠分组 -->
           <div v-for="conn in groupedConnections.plain" :key="conn.id" class="conn-item">
@@ -1148,9 +1172,12 @@ onMounted(loadConnections)
             </template>
           </div>
 
-          <!-- 无连接提示 -->
-          <div v-if="savedConnections.length === 0" class="conn-empty">
-            暂无保存的连接，点击「新建连接」添加
+          <!-- 无连接 / 搜索无结果提示 -->
+          <div v-if="filteredConnections.length === 0" class="conn-empty">
+            <template v-if="savedConnections.length === 0">
+              暂无保存的连接，点击「新建连接」添加
+            </template>
+            <template v-else>没有匹配「{{ connSearch }}」的连接</template>
           </div>
         </div>
 
@@ -1592,6 +1619,12 @@ onMounted(loadConnections)
   font-size: 13px;
   font-weight: 600;
   color: var(--color-text-secondary);
+}
+
+/* 连接搜索框 */
+.conn-search {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
 }
 
 .conn-list {

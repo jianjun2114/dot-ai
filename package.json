@@ -43,6 +43,7 @@
     "iconv-lite": "^0.7.3",
     "jspdf": "^4.2.1",
     "jszip": "^3.10.1",
+    "lunar-typescript": "^1.8.6",
     "mammoth": "^1.12.1",
     "marked": "^18.0.7",
     "md-editor-v3": "^6.5.6",

@@ -2,51 +2,56 @@
 
 > AI 驱动的桌面工作台 —— 集智能对话、智能体、Shell、浏览器、接口测试、文档编辑转换、数据库操作于一体。
 
-[![Electron](https://img.shields.io/badge/Electron-43-9feaf9?logo=electron&logoColor=black)](https://www.electronjs.org/)
-[![Vue](https://img.shields.io/badge/Vue-3-42b883?logo=vite&logoColor=white)](https://vuejs.org/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Electron](https://img.shields.io/badge/Electron-43-9feaf9?logo=electron\&logoColor=black)](https://www.electronjs.org/)
+[![Vue](https://img.shields.io/badge/Vue-3-42b883?logo=vite\&logoColor=white)](https://vuejs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?logo=typescript\&logoColor=white)](https://www.typescriptlang.org/)
 [![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial-lightgrey.svg)](LICENSE)
 
 ## ✨ 功能亮点
 
 - **全栈 AI 智能体** — Shell 和浏览器页面自带 AI 面板，一条自然语言指令自动规划 → 调用工具 → 循环执行，支持 16 种浏览器操作和本地/远程 Shell 命令
-- **多后端对话** — OpenAI 兼容 / SSE 流式 / STOMP WebSocket / HTTP 直连，思考模式、Function Calling、MCP 工具调用、内置本地工具集一站式支持
+- **AI 任务编排** — 任务模式自动生成多步骤执行计划，依赖就绪的子任务并行执行，带结果验证、失败自动重试/回滚修复与最终总结
+- **多后端对话** — OpenAI 兼容 / SSE 流式 / STOMP WebSocket / HTTP 直连，思考模式、Function Calling、MCP 工具调用、内置本地工具集一站式支持；支持图片识别与文件附件
 - **本地 + 远程 Shell** — node-pty 真实 PTY 彩色终端 + ssh2 远程会话 + SFTP 文件管理多标签并存；危险命令自动识别，气泡内确认并可加白名单
 - **内嵌浏览器** — Electron webview 多标签浏览器，AI 可直接操作（点击、输入、滚动、抓取 DOM 结构、截图等）
 - **文档在线编辑** — 集成 ONLYOFFICE Document Server，Word / Excel / PPT 在线预览与协同编辑
 - **数据库管理** — 多连接（MySQL / PostgreSQL / Oracle / OceanBase），SQL 查询、智能补全、表结构查看与在线编辑、序列 / 存储过程查看
+- **首页黄历宜忌** — 农历黄历每日展示，AI 生成宜忌建议并按天缓存（失败自动回退原始黄历）
 - **跨平台打包** — 一键生成 Windows NSIS / macOS DMG / Linux AppImage，安装包支持自定义安装路径
 
 ## 📦 功能模块
 
-| 模块 | 说明 |
-|---|---|
-| 💬 智能对话 | 多后端 LLM 接入、思考模式、Function Calling、MCP 工具调用 |
-| 🤖 智能体（Shell） | AI 驱动的终端自动化：PowerShell / SSH 命令、危险命令防护、会话白名单 |
-| 🤖 智能体（浏览器） | AI 驱动的网页自动化：navigate / click / input / scroll / read / structure 等 16 种操作 |
-| 🖥️ 百宝箱 · Shell | 本地 PowerShell + 远程 SSH 多标签终端，SFTP 文件管理 |
-| 🌐 百宝箱 · 浏览器 | 内嵌多标签 webview 浏览器 |
-| 🔌 百宝箱 · 接口测试 | HTTP / SSE 真流式 / WebSocket / TCP 原始 socket，主进程代理规避 CORS |
-| 📄 百宝箱 · 文档转换 | Word → Markdown、PDF 转图片、Markdown → HTML、批量处理 + ZIP 下载 |
-| ✍️ 百宝箱 · 文档编辑 | ONLYOFFICE 在线编辑 Word / Excel / PPT，文件列表管理与实时保存 |
-| 🗄️ 百宝箱 · 数据库 | 多连接管理、SQL 查询（分页 / 解释计划 / 保存脚本）、上下文智能补全、表结构查看与编辑、数据增删改、序列 / 存储过程查看 |
-| 📒 日历笔记 | Tiptap 富文本编辑器，按日期归档 |
-| ⚙️ 设置中心 | 多 LLM endpoint、对话模式、内置工具、主题切换 |
+| 模块              | 说明                                                                            |
+| --------------- | ----------------------------------------------------------------------------- |
+| 🏠 首页           | 时钟 + 农历黄历宜忌，AI 每日建议（按天持久化缓存）                                                  |
+| 💬 智能对话         | 多后端 LLM 接入、思考模式、Function Calling、MCP 工具调用、图片识别（最多 4 张）、文件附件                   |
+| 🎯 AI 任务        | 任务面板：计划生成 → 依赖并行调度 → 逐步验证 → 失败重试/修复 → 总结，支持 JSON 导入                           |
+| 🤖 智能体（Shell）   | AI 驱动的终端自动化：PowerShell / SSH 命令、危险命令防护、会话白名单                                  |
+| 🤖 智能体（浏览器）     | AI 驱动的网页自动化：navigate / click / input / scroll / read / structure 等 16 种操作     |
+| 🖥️ 百宝箱 · Shell | 本地 PowerShell + 远程 SSH 多标签终端，SFTP 文件管理                                        |
+| 🌐 百宝箱 · 浏览器    | 内嵌多标签 webview 浏览器                                                             |
+| 🔌 百宝箱 · 接口测试   | HTTP / SSE 真流式 / WebSocket / TCP 原始 socket，主进程代理规避 CORS                       |
+| 📄 百宝箱 · 文档转换   | Word → Markdown、Word ↔ PDF（Word COM 引擎）、PDF 转图片、Markdown → HTML、批量处理 + ZIP 下载 |
+| ✍️ 百宝箱 · 文档编辑   | ONLYOFFICE 在线编辑 Word / Excel / PPT，文件列表管理与实时保存                                |
+| 🗄️ 百宝箱 · 数据库   | 多连接管理、SQL 查询（分页 / 解释计划 / 保存脚本）、上下文智能补全、表结构查看与编辑、数据增删改、序列 / 存储过程查看             |
+| 🎨 百宝箱 · 画图     | PS 风格画板，画笔 / 图形绘制与导出                                                          |
+| 📒 日历笔记         | Tiptap 富文本编辑器，按日期归档                                                           |
+| ⚙️ 设置中心         | 多 LLM endpoint、对话模式、内置工具、主题切换                                                 |
 
 ## 🛠️ 技术栈
 
-| 分层 | 选型 |
-|---|---|
-| 桌面框架 | Electron 43 |
-| 构建 | electron-vite（主进程 / 预加载 / 渲染进程三入口） |
-| 前端 | Vue 3 + TypeScript + Vue Router（hash）+ Element Plus |
-| 编辑器 | Tiptap 3 |
-| 终端 | xterm.js + node-pty + ssh2 |
-| Markdown | marked + highlight.js + md-editor-v3 |
-| 文档处理 | mammoth · pdfjs-dist · jsPDF + html2canvas · JSZip |
-| 在线办公 | ONLYOFFICE Document Server + JWT |
-| 数据库 | oracledb（thin）· mysql2/promise · pg |
-| 打包 | electron-builder（NSIS / DMG / AppImage + deb + snap） |
+| 分层       | 选型                                                   |
+| -------- | ---------------------------------------------------- |
+| 桌面框架     | Electron 43                                          |
+| 构建       | electron-vite（主进程 / 预加载 / 渲染进程三入口）                   |
+| 前端       | Vue 3 + TypeScript + Vue Router（hash）+ Element Plus  |
+| 编辑器      | Tiptap 3                                             |
+| 终端       | xterm.js + node-pty + ssh2                           |
+| Markdown | marked + highlight.js + md-editor-v3                 |
+| 文档处理     | mammoth · pdfjs-dist · jsPDF + html2canvas · JSZip   |
+| 在线办公     | ONLYOFFICE Document Server + JWT                     |
+| 数据库      | oracledb（thin）· mysql2/promise · pg                  |
+| 打包       | electron-builder（NSIS / DMG / AppImage + deb + snap） |
 
 ## 🚀 快速开始
 
@@ -112,4 +117,5 @@ dot-ai/
 ## 🖥️ 系统要求
 
 - **开发**：Windows / macOS / Linux 均支持
-- **运行**：Windows 10+（已打包）；macOS / Linux 可自行 `npm run build` 生成
+- **运行**：Windows 10+ ；macOS / Linux 可自行 `npm run build` 生成
+

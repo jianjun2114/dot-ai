@@ -1,11 +1,23 @@
-<script setup lang="ts">
-import { computed, ref, onMounted, watch, nextTick } from 'vue'
-import { Marked, type Tokens } from 'marked'
-import hljs from 'highlight.js'
-import { ElMessage } from 'element-plus'
-import { CopyDocument, Check } from '@element-plus/icons-vue'
+<script lang="ts">
+/** 长任务步骤状态 */
+export type LongTaskStatus = 'wait' | 'running' | 'done' | 'error'
 
-interface Props {
+/** 长任务步骤（status 非 wait 时可查看详情） */
+export interface LongTaskStep {
+  name: string
+  status: LongTaskStatus
+  detail?: string
+}
+
+/** 长任务展示数据（经 longTask prop 传入，气泡内渲染步骤列表 + 总结） */
+export interface LongTaskData {
+  title: string
+  steps: LongTaskStep[]
+  summary?: string
+}
+
+/** 组件 Props（导出避免 vue-tsc 私有名错误） */
+export interface AssistantMessageProps {
   /** 回复流内容：含 <think> 思考块、TOOL_CALL/TOOL_RESULT 工具标记、Markdown 正文，组件内部解析渲染 */
   content: string
   timestamp?: Date
@@ -18,14 +30,75 @@ interface Props {
   confirm?: { question: string; actions: string[] } | null
   /** 确认按钮点击回调：返回用户选择的按钮文案 */
   onConfirmAction?: (action: string) => void
+  /** 长任务状态：非空时气泡渲染长任务卡片（步骤状态 + 详情 + 总结区） */
+  longTask?: LongTaskData | null
+  /** 是否展示思考过程：未开启深度思考时隐藏 <think> 内容 */
+  showThinking?: boolean
 }
+</script>
 
-const props = withDefaults(defineProps<Props>(), {
+<script setup lang="ts">
+import { computed, ref, reactive, onMounted, watch, nextTick } from 'vue'
+import { Marked, type Tokens } from 'marked'
+import hljs from 'highlight.js'
+import { ElMessage } from 'element-plus'
+import { CopyDocument, Check } from '@element-plus/icons-vue'
+import iconPng from '../assets/icon.png'
+
+const props = withDefaults(defineProps<AssistantMessageProps>(), {
   timestamp: () => new Date(),
   isStreaming: false,
   executeLabel: '执行',
-  confirm: null
+  confirm: null,
+  longTask: null,
+  showThinking: true
 })
+
+// ==================== 长任务展示 ====================
+/** 展开的步骤下标集合（非 wait 状态的步骤可点击查看详情） */
+const expandedSteps = reactive(new Set<number>())
+
+/** 长任务是否已整体完成（全部步骤终态且已有总结）：完成后步骤列表默认折叠 */
+const longTaskFinished = computed(
+  () =>
+    !!props.longTask &&
+    props.longTask.steps.length > 0 &&
+    props.longTask.steps.every((s) => s.status === 'done' || s.status === 'error') &&
+    !!props.longTask.summary
+)
+
+/** 完成后步骤列表默认关闭（可点击标题重新展开） */
+const stepsCollapsed = ref(false)
+watch(
+  longTaskFinished,
+  (finished) => {
+    if (finished) {
+      stepsCollapsed.value = true
+      expandedSteps.clear()
+    }
+  },
+  { immediate: true }
+)
+
+/** 已完成步骤数（进度展示） */
+const doneCount = computed(
+  () => props.longTask?.steps.filter((s) => s.status === 'done').length ?? 0
+)
+
+const STATUS_LABELS: Record<LongTaskStatus, string> = {
+  wait: '等待',
+  running: '执行中',
+  done: '完成',
+  error: '报错'
+}
+
+/** 切换步骤详情展开（等待状态无详情不可展开） */
+const toggleStep = (i: number): void => {
+  const step = props.longTask?.steps[i]
+  if (!step || step.status === 'wait' || !step.detail) return
+  if (expandedSteps.has(i)) expandedSteps.delete(i)
+  else expandedSteps.add(i)
+}
 
 const copied = ref(false)
 const contentRef = ref<HTMLElement>()
@@ -94,7 +167,11 @@ const buildRawCall = (raw: string): Segment => {
         a = JSON.parse(s)
       } catch {
         /* 双重编码未到齐，按原文展示 */
-        return { type: 'rawcall', summary: name, body: s.replace(/\\n/g, '\n').replace(/\\"/g, '"') }
+        return {
+          type: 'rawcall',
+          summary: name,
+          body: s.replace(/\\n/g, '\n').replace(/\\"/g, '"')
+        }
       }
     }
     args = (a ?? {}) as Record<string, unknown>
@@ -115,7 +192,8 @@ const buildRawCall = (raw: string): Segment => {
     body = content
     if (Object.keys(rest).length) body = `${JSON.stringify(rest)}\n\n${content}`
   } else {
-    const { name: _n, ...restArgs } = args as { name?: unknown }
+    const restArgs: Record<string, unknown> = { ...args }
+    delete restArgs.name
     body = JSON.stringify(restArgs, null, 2)
   }
   return { type: 'rawcall', summary, body }
@@ -181,6 +259,11 @@ const parseSegments = (content: string): Segment[] => {
     if (rest.trim()) segments.push({ type: 'text', text: rest })
   }
   const pushNonMarked = (chunk: string): void => {
+    // 未开启深度思考时不展示思考过程，直接剥离 <think> 块
+    if (!props.showThinking) {
+      pushText(chunk.replace(/<think>[\s\S]*?(<\/think>|$)/g, ''))
+      return
+    }
     let p = 0
     const thinkRe = /<think>([\s\S]*?)(<\/think>|$)/g
     let tm: RegExpExecArray | null
@@ -365,39 +448,56 @@ const formattedTime = computed(() => {
 <template>
   <div class="assistant-message">
     <div class="message-avatar">
-      <svg
-        viewBox="0 0 24 24"
-        fill="none"
-        xmlns="http://www.w3.org/2000/svg"
-        width="18"
-        height="18"
-      >
-        <path
-          d="M12 2L2 7L12 12L22 7L12 2Z"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        />
-        <path
-          d="M2 17L12 22L22 17"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        />
-        <path
-          d="M2 12L12 17L22 12"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        />
-      </svg>
+      <img :src="iconPng" alt="AI" class="avatar-img" />
     </div>
     <div class="message-body">
-      <!-- 气泡容器：按片段顺序渲染（思考折叠 × N + 工具折叠 × N + Markdown 正文） -->
+      <!-- 气泡容器：长任务卡片 + 按片段顺序渲染（思考折叠 × N + 工具折叠 × N + Markdown 正文） -->
       <div ref="contentRef" class="message-content markdown-body">
+        <!-- 长任务卡片：标题 + 步骤状态列表 + 总结区（与思考/工具区块相互独立） -->
+        <div v-if="longTask" class="ai-long-task" :class="{ finished: longTaskFinished }">
+          <div class="ai-lt-header" @click="longTaskFinished && (stepsCollapsed = !stepsCollapsed)">
+            <span class="ai-lt-title">🧭 {{ longTask.title }}</span>
+            <span class="ai-lt-progress">
+              {{ longTaskFinished ? '已完成' : '进行中' }} · {{ doneCount }}/{{
+                longTask.steps.length
+              }}
+              <span v-if="longTaskFinished" class="ai-lt-chevron">{{
+                stepsCollapsed ? '▸' : '▾'
+              }}</span>
+            </span>
+          </div>
+          <template v-if="!stepsCollapsed">
+            <div class="ai-lt-steps">
+              <div
+                v-for="(st, i) in longTask.steps"
+                :key="i"
+                class="ai-lt-step"
+                :class="[st.status, { expandable: st.status !== 'wait' && st.detail }]"
+              >
+                <div class="ai-lt-step-row" @click="toggleStep(i)">
+                  <span class="ai-lt-dot">
+                    <span v-if="st.status === 'running'" class="ai-lt-spinner"></span>
+                  </span>
+                  <span class="ai-lt-step-name">{{ st.name }}</span>
+                  <span class="ai-lt-status" :class="st.status">{{
+                    STATUS_LABELS[st.status]
+                  }}</span>
+                  <span v-if="st.status !== 'wait' && st.detail" class="ai-lt-chevron">
+                    {{ expandedSteps.has(i) ? '▾' : '▸' }}
+                  </span>
+                </div>
+                <pre v-if="expandedSteps.has(i) && st.detail" class="ai-lt-detail">{{
+                  st.detail
+                }}</pre>
+              </div>
+            </div>
+            <!-- 总结区：所有步骤列表下方 -->
+            <div v-if="longTask.summary" class="ai-lt-summary">
+              <div class="ai-lt-summary-title">📋 任务总结</div>
+              <div class="ai-lt-summary-body">{{ longTask.summary }}</div>
+            </div>
+          </template>
+        </div>
         <template v-for="(seg, i) in segments" :key="i">
           <!-- 思考块：流式中未闭合时展开，闭合后折叠，点击可展开 -->
           <details
@@ -405,12 +505,22 @@ const formattedTime = computed(() => {
             class="ai-reasoning"
             :open="isStreaming && !seg.closed"
           >
-            <summary>思考过程</summary>
+            <summary>
+              <span class="ai-sec-icon">💭</span>
+              <span class="ai-sec-title">思考过程</span>
+              <span v-if="isStreaming && !seg.closed" class="ai-sec-status running">思考中…</span>
+            </summary>
             <div class="ai-reasoning-body">{{ seg.text }}</div>
           </details>
           <!-- 工具调用：名称「调用工具 XXX」，执行结果折叠在内点击展开 -->
           <details v-else-if="seg.type === 'tool'" class="ai-tool-call">
-            <summary>执行: {{ seg.name }}</summary>
+            <summary>
+              <span class="ai-sec-icon">🔧</span>
+              <span class="ai-sec-title">{{ seg.name }}</span>
+              <span class="ai-sec-status" :class="seg.done ? 'done' : 'running'">
+                {{ seg.done ? '已完成' : '执行中…' }}
+              </span>
+            </summary>
             <pre class="ai-tool-result">{{ seg.done ? seg.result : '执行中...' }}</pre>
           </details>
           <!-- 模型输出的调用语句：原文隐藏，仅轻量提示正在调用 -->
@@ -419,7 +529,10 @@ const formattedTime = computed(() => {
           </div>
           <!-- 正文中的裸 JSON 调用：格式化为「工具名：参数摘要」，内容还原真实换行 -->
           <details v-else-if="seg.type === 'rawcall'" class="ai-tool-call">
-            <summary>🔧 {{ seg.summary }}</summary>
+            <summary>
+              <span class="ai-sec-icon">🔧</span>
+              <span class="ai-sec-title">{{ seg.summary }}</span>
+            </summary>
             <pre class="ai-tool-result">{{ seg.body }}</pre>
           </details>
           <!-- 正文：Markdown 渲染（代码已转义），按钮经事件委托响应 -->
@@ -445,7 +558,8 @@ const formattedTime = computed(() => {
           </div>
         </div>
       </div>
-      <div class="message-toolbar">
+      <!-- 纯长任务气泡（无正文）隐藏工具栏，避免出现无意义的复制按钮 -->
+      <div v-if="plainText.trim() || !longTask" class="message-toolbar">
         <button class="tool-btn" :class="{ copied }" title="复制内容" @click="copyContent">
           <el-icon v-if="!copied" :size="13"><CopyDocument /></el-icon>
           <el-icon v-else :size="13"><Check /></el-icon>
@@ -466,16 +580,23 @@ const formattedTime = computed(() => {
 }
 
 .message-avatar {
-  width: 32px;
-  height: 32px;
+  width: 48px;
+  height: 48px;
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  background: var(--color-primary);
-  color: #ffffff;
-  box-shadow: var(--shadow-card);
+  background: transparent;
+  align-self: flex-start;
+  margin-top: 6px;
+  overflow: hidden;
+}
+
+.avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .message-body {
@@ -720,50 +841,110 @@ const formattedTime = computed(() => {
   color: #e6c07b;
 }
 
-/* ===== 思考过程（气泡顶部可折叠区） ===== */
+/* ===== 思考过程（可折叠卡片，气泡内独立区块） ===== */
 .ai-reasoning {
-  margin-bottom: 8px;
-  padding: 6px 10px;
-  border-left: 2px solid var(--color-primary);
+  margin: 0 0 8px;
+  border: 1px solid color-mix(in srgb, var(--color-primary) 25%, var(--color-border));
   background: color-mix(in srgb, var(--color-primary) 5%, transparent);
-  border-radius: 6px;
+  border-radius: 8px;
+  overflow: hidden;
 }
 
-.ai-reasoning summary {
-  font-size: 12px;
-  color: var(--color-text-secondary);
+.ai-reasoning summary,
+.ai-tool-call summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
   cursor: pointer;
   user-select: none;
+  list-style: none;
+  transition: background 0.15s;
+}
+
+.ai-reasoning summary::-webkit-details-marker,
+.ai-tool-call summary::-webkit-details-marker {
+  display: none;
+}
+
+.ai-reasoning summary:hover,
+.ai-tool-call summary:hover {
+  background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+}
+
+/* 区块公共元素：图标 / 标题 / 状态徽标 */
+.ai-sec-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.ai-sec-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-sec-status {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 9px;
+  flex-shrink: 0;
+}
+
+.ai-sec-status.running {
+  color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 12%, transparent);
+  animation: sec-pulse 1.4s ease-in-out infinite;
+}
+
+.ai-sec-status.done {
+  color: var(--color-success, #67c23a);
+  background: color-mix(in srgb, var(--color-success, #67c23a) 12%, transparent);
+}
+
+@keyframes sec-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
 }
 
 .ai-reasoning-body {
-  margin-top: 6px;
+  margin: 0 10px 8px;
+  padding: 8px 10px;
   font-size: 12px;
+  line-height: 1.6;
   color: var(--color-text-secondary);
   white-space: pre-wrap;
   max-height: 200px;
   overflow-y: auto;
-}
-
-/* ===== 工具调用列表（每条可折叠，结果点击展开） ===== */
-.ai-tool-call {
-  margin-bottom: 6px;
-  padding: 5px 10px;
-  border-left: 2px solid var(--color-primary);
-  background: color-mix(in srgb, var(--color-primary) 6%, transparent);
+  background: color-mix(in srgb, var(--color-bg) 60%, transparent);
   border-radius: 6px;
 }
 
-.ai-tool-call summary {
-  font-size: 12px;
-  color: var(--color-text);
-  cursor: pointer;
-  user-select: none;
-  font-weight: 500;
+/* ===== 工具调用（可折叠卡片，气泡内独立区块，与思考区块样式区分） ===== */
+.ai-tool-call {
+  margin: 0 0 6px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.ai-tool-call .ai-sec-icon {
+  filter: saturate(0.8);
 }
 
 .ai-tool-result {
-  margin: 6px 0 0;
+  margin: 0 10px 10px;
   padding: 8px 10px;
   font-size: 12px;
   line-height: 1.5;
@@ -772,9 +953,203 @@ const formattedTime = computed(() => {
   word-break: break-word;
   max-height: 240px;
   overflow-y: auto;
-  background: var(--color-bg);
+  background: color-mix(in srgb, var(--color-card) 70%, transparent);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-family: Consolas, Monaco, monospace;
+}
+
+/* ===== 长任务卡片（longTask prop 非空时渲染） ===== */
+.ai-long-task {
+  margin: 0 0 10px;
+  border: 1px solid color-mix(in srgb, var(--color-primary) 30%, var(--color-border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-primary) 4%, transparent);
+  overflow: hidden;
+}
+
+.ai-long-task.finished {
+  border-color: color-mix(in srgb, var(--color-success, #67c23a) 35%, var(--color-border));
+  background: color-mix(in srgb, var(--color-success, #67c23a) 4%, transparent);
+}
+
+.ai-lt-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+}
+
+.ai-long-task.finished .ai-lt-header {
+  background: color-mix(in srgb, var(--color-success, #67c23a) 8%, transparent);
+}
+
+.ai-lt-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-lt-progress {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
+}
+
+.ai-lt-chevron {
+  font-size: 10px;
+  color: var(--color-text-secondary);
+}
+
+.ai-lt-steps {
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ai-lt-step {
+  border-radius: 6px;
+}
+
+.ai-lt-step.expandable {
+  cursor: pointer;
+}
+
+.ai-lt-step.expandable:hover {
+  background: color-mix(in srgb, var(--color-primary) 6%, transparent);
+}
+
+.ai-lt-step-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+}
+
+/* 状态圆点：等待空心 / 执行中旋转 / 完成 / 报错 */
+.ai-lt-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--color-border);
+}
+
+.ai-lt-step.running .ai-lt-dot {
+  border-color: transparent;
+}
+
+.ai-lt-step.done .ai-lt-dot {
+  border-color: var(--color-success, #67c23a);
+  background: var(--color-success, #67c23a);
+}
+
+.ai-lt-step.error .ai-lt-dot {
+  border-color: var(--el-color-danger, #f56c6c);
+  background: var(--el-color-danger, #f56c6c);
+}
+
+.ai-lt-spinner {
+  width: 10px;
+  height: 10px;
+  border: 2px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: lt-spin 0.8s linear infinite;
+}
+
+@keyframes lt-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.ai-lt-step-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-lt-step.wait .ai-lt-step-name {
+  color: var(--color-text-secondary);
+}
+
+.ai-lt-status {
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.ai-lt-status.wait {
+  color: var(--color-text-secondary);
+}
+
+.ai-lt-status.running {
+  color: var(--color-primary);
+}
+
+.ai-lt-status.done {
+  color: var(--color-success, #67c23a);
+}
+
+.ai-lt-status.error {
+  color: var(--el-color-danger, #f56c6c);
+}
+
+.ai-lt-detail {
+  margin: 0 8px 6px 24px;
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 160px;
+  overflow-y: auto;
+  background: color-mix(in srgb, var(--color-bg) 70%, transparent);
+  border-left: 2px solid var(--color-primary);
   border-radius: 4px;
   font-family: Consolas, Monaco, monospace;
+}
+
+/* 总结区：步骤列表下方 */
+.ai-lt-summary {
+  margin: 0 8px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--color-card) 70%, transparent);
+  overflow: hidden;
+}
+
+.ai-lt-summary-title {
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text);
+  background: color-mix(in srgb, var(--color-primary) 6%, transparent);
+}
+
+.ai-lt-summary-body {
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+  max-height: 220px;
+  overflow-y: auto;
 }
 
 /* 模型调用语句提示：原文隐藏后的轻量占位 */

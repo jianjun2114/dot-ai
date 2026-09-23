@@ -13,6 +13,7 @@ import { getAppPath } from '../utils/config'
 /** 默认配置 */
 const DEFAULT_SETTINGS: AppSettings = {
   calendarNotesPath: '',
+  homeYiJiEnabled: true,
   docEditServerUrl: '',
   chatEndpoints: [],
   llmConfigs: [],
@@ -32,6 +33,7 @@ let loaded = false
 function mergeWithDefaults(raw: Partial<AppSettings>): AppSettings {
   return {
     calendarNotesPath: raw.calendarNotesPath ?? '',
+    homeYiJiEnabled: raw.homeYiJiEnabled ?? true,
     docEditServerUrl: raw.docEditServerUrl ?? '',
     chatEndpoints: raw.chatEndpoints ?? [],
     llmConfigs: (raw.llmConfigs ?? []).map((c) => ({ ...c, enabled: c.enabled ?? false })),
@@ -88,6 +90,7 @@ async function saveSettings(): Promise<void> {
       settings.value.llmConfigs.find((c) => c.enabled) ?? settings.value.llmConfigs[0]
     const compat: Record<string, unknown> = {
       calendarNotesPath: settings.value.calendarNotesPath,
+      homeYiJiEnabled: settings.value.homeYiJiEnabled,
       docEditServerUrl: settings.value.docEditServerUrl,
       chatEndpoints: settings.value.chatEndpoints,
       llmConfigs: settings.value.llmConfigs,

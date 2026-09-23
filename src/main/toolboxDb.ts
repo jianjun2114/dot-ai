@@ -51,6 +51,19 @@ export interface DbColumnInfo {
   comment?: string
 }
 
+/** 索引/约束元信息（表结构 tab 的索引/外键/唯一键展示） */
+export interface DbIndexInfo {
+  name: string
+  /** INDEX 普通索引 / UNIQUE 唯一键 / FOREIGN 外键 */
+  kind: 'INDEX' | 'UNIQUE' | 'FOREIGN'
+  /** 逗号分隔的字段列表（按列序） */
+  columns: string
+  /** 外键引用的表 */
+  refTable?: string
+  /** 外键引用的字段（逗号分隔） */
+  refColumns?: string
+}
+
 /** 统一查询结果 */
 export interface DbQueryResult {
   columns: string[]
@@ -122,9 +135,73 @@ const quoteIdent = (kind: DbKind, id: string): string => {
     .join('.')
 }
 
-/** 去掉结尾分号（Oracle 驱动不允许尾随分号），仅执行单条语句 */
+/** 去掉 SQL 中的注释（单行 -- 和块注释 /\* *\/），保留字符串字面量内的内容；再去结尾分号 */
+const stripSqlComments = (rawSql: string): string => {
+  let out = ''
+  let i = 0
+  let inS = false
+  let inD = false
+  let inBT = false
+  while (i < rawSql.length) {
+    const c = rawSql[i]
+    const n = rawSql[i + 1] ?? ''
+    if (inS) {
+      out += c
+      if (c === "'") inS = false
+      i++
+      continue
+    }
+    if (inD) {
+      out += c
+      if (c === '"') inD = false
+      i++
+      continue
+    }
+    if (inBT) {
+      out += c
+      if (c === '`') inBT = false
+      i++
+      continue
+    }
+    if (c === "'") {
+      inS = true
+      out += c
+      i++
+      continue
+    }
+    if (c === '"') {
+      inD = true
+      out += c
+      i++
+      continue
+    }
+    if (c === '`') {
+      inBT = true
+      out += c
+      i++
+      continue
+    }
+    if (c === '-' && n === '-') {
+      out += ' '
+      i += 2
+      while (i < rawSql.length && rawSql[i] !== '\n') i++
+      continue
+    }
+    if (c === '/' && n === '*') {
+      out += ' '
+      i += 2
+      while (i < rawSql.length && !(rawSql[i] === '*' && rawSql[i + 1] === '/')) i++
+      i += 2
+      continue
+    }
+    out += c
+    i++
+  }
+  return out
+}
+
 const normalizeSql = (sql: string): string =>
-  sql
+  stripSqlComments(sql)
     .trim()
     .replace(/;+\s*$/, '')
     .trim()
@@ -309,7 +386,7 @@ const readCatalog = async (
   session: DbSession,
   scope: string,
   parent?: { database?: string; schema?: string; table?: string }
-): Promise<CatalogItem[] | DbColumnInfo[]> => {
+): Promise<CatalogItem[] | DbColumnInfo[] | DbIndexInfo[]> => {
   const kind = session.kind
 
   if (scope === 'databases') {
@@ -468,6 +545,168 @@ const readCatalog = async (
       pk: pkNames.has(String(row.name)),
       comment: row.comments ? String(row.comments) : undefined
     }))
+  }
+
+  if (scope === 'indexes') {
+    const table = sanitizeIdent(parent?.table || '')
+    /** 构造统一的索引/约束信息 */
+    const toInfo = (
+      name: string,
+      kind: DbIndexInfo['kind'],
+      columns: string,
+      refTable?: string,
+      refColumns?: string
+    ): DbIndexInfo => ({
+      name,
+      kind,
+      columns,
+      refTable,
+      refColumns
+    })
+
+    if (kind === 'mysql' || kind === 'oceanbase-mysql') {
+      const schema = sanitizeIdent(parent?.schema || parent?.database || '')
+      // 索引（PRIMARY 主键索引由字段列表的 🔑 标识展示，此处排除）
+      const idxR = await runQuery(
+        session,
+        `SELECT INDEX_NAME AS name, NON_UNIQUE AS nonUnique,
+                GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS cols
+         FROM information_schema.STATISTICS
+         WHERE TABLE_SCHEMA = '${schema}' AND TABLE_NAME = '${table}' AND INDEX_NAME <> 'PRIMARY'
+         GROUP BY INDEX_NAME, NON_UNIQUE`
+      )
+      // 外键
+      const fkR = await runQuery(
+        session,
+        `SELECT CONSTRAINT_NAME AS name,
+                GROUP_CONCAT(COLUMN_NAME ORDER BY ORDINAL_POSITION) AS cols,
+                REFERENCED_TABLE_NAME AS refTable,
+                GROUP_CONCAT(REFERENCED_COLUMN_NAME ORDER BY ORDINAL_POSITION) AS refColumns
+         FROM information_schema.KEY_COLUMN_USAGE
+         WHERE TABLE_SCHEMA = '${schema}' AND TABLE_NAME = '${table}'
+           AND REFERENCED_TABLE_NAME IS NOT NULL
+         GROUP BY CONSTRAINT_NAME, REFERENCED_TABLE_NAME`
+      )
+      const list: DbIndexInfo[] = idxR.rows.map((row) =>
+        toInfo(
+          String(row.name),
+          Number(row.nonUnique) === 1 ? 'INDEX' : 'UNIQUE',
+          String(row.cols)
+        )
+      )
+      for (const row of fkR.rows) {
+        list.push(
+          toInfo(
+            String(row.name),
+            'FOREIGN',
+            String(row.cols),
+            row.refTable ? String(row.refTable) : undefined,
+            row.refColumns ? String(row.refColumns) : undefined
+          )
+        )
+      }
+      return list
+    }
+
+    if (kind === 'pgsql') {
+      const schema = sanitizeIdent(parent?.schema || 'public')
+      const regclass = `${sanitizeIdent(schema)}.${table}`
+      // 索引（含唯一索引；主键索引排除）
+      const idxR = await runQuery(
+        session,
+        `SELECT i.relname AS name, ix.indisunique AS uni,
+                string_agg(a.attname, ',' ORDER BY array_position(ix.indkey, a.attnum)) AS cols
+         FROM pg_class t
+         JOIN pg_index ix ON ix.indrelid = t.oid
+         JOIN pg_class i ON i.oid = ix.indexrelid
+         JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+         WHERE t.relnamespace = to_regnamespace('${schema}') AND t.relname = '${table}'
+           AND NOT ix.indisprimary
+         GROUP BY i.relname, ix.indisunique`
+      )
+      // 外键
+      const fkR = await runQuery(
+        session,
+        `SELECT con.conname AS name,
+                (SELECT string_agg(a.attname, ',' ORDER BY x.ord)
+                   FROM unnest(con.conkey) WITH ORDINALITY AS x(attnum, ord)
+                   JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = x.attnum) AS cols,
+                ft.relname AS refTable,
+                (SELECT string_agg(a.attname, ',' ORDER BY x.ord)
+                   FROM unnest(con.confkey) WITH ORDINALITY AS x(attnum, ord)
+                   JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = x.attnum) AS refColumns
+         FROM pg_constraint con
+         JOIN pg_class ft ON ft.oid = con.confrelid
+         WHERE con.conrelid = '${regclass}'::regclass AND con.contype = 'f'`
+      )
+      const list: DbIndexInfo[] = idxR.rows.map((row) =>
+        toInfo(String(row.name), row.uni ? 'UNIQUE' : 'INDEX', String(row.cols))
+      )
+      for (const row of fkR.rows) {
+        list.push(
+          toInfo(
+            String(row.name),
+            'FOREIGN',
+            String(row.cols),
+            row.refTable ? String(row.refTable) : undefined,
+            row.refColumns ? String(row.refColumns) : undefined
+          )
+        )
+      }
+      return list
+    }
+
+    // Oracle / OceanBase Oracle
+    const owner = sanitizeIdent(parent?.schema || session.currentSchema || '')
+    // 唯一/外键约束（唯一约束与同名唯一索引去重）
+    const consR = await runQuery(
+      session,
+      `SELECT cons.constraint_name AS "name", cons.constraint_type AS "ctype",
+              (SELECT LISTAGG(c.column_name, ',') WITHIN GROUP (ORDER BY c.position)
+                 FROM all_cons_columns c
+                 WHERE c.owner = cons.owner AND c.constraint_name = cons.constraint_name) AS "cols",
+              rc.table_name AS "refTable",
+              (SELECT LISTAGG(c.column_name, ',') WITHIN GROUP (ORDER BY c.position)
+                 FROM all_cons_columns c
+                 WHERE c.owner = rc.owner AND c.constraint_name = rc.constraint_name) AS "refColumns"
+       FROM all_constraints cons
+       LEFT JOIN all_constraints rc
+         ON rc.owner = cons.r_owner AND rc.constraint_name = cons.r_constraint_name
+       WHERE UPPER(cons.owner) = UPPER('${owner}') AND UPPER(cons.table_name) = UPPER('${table}')
+         AND cons.constraint_type IN ('U','R')`
+    )
+    const uniqueNames = new Set<string>()
+    const list: DbIndexInfo[] = []
+    for (const row of consR.rows) {
+      if (String(row.ctype) === 'U') uniqueNames.add(String(row.name))
+      list.push(
+        toInfo(
+          String(row.name),
+          String(row.ctype) === 'R' ? 'FOREIGN' : 'UNIQUE',
+          String(row.cols),
+          row.refTable ? String(row.refTable) : undefined,
+          row.refColumns ? String(row.refColumns) : undefined
+        )
+      )
+    }
+    // 普通索引/独立唯一索引（排除与唯一约束同名的索引）
+    const idxR = await runQuery(
+      session,
+      `SELECT i.index_name AS "name", i.uniqueness AS "uniqueness",
+              (SELECT LISTAGG(ic.column_name, ',') WITHIN GROUP (ORDER BY ic.column_position)
+                 FROM all_ind_columns ic
+                 WHERE ic.index_owner = i.owner AND ic.index_name = i.index_name) AS "cols"
+       FROM all_indexes i
+       WHERE UPPER(i.owner) = UPPER('${owner}') AND UPPER(i.table_name) = UPPER('${table}')`
+    )
+    for (const row of idxR.rows) {
+      const name = String(row.name)
+      if (uniqueNames.has(name)) continue
+      list.push(
+        toInfo(name, String(row.uniqueness) === 'UNIQUE' ? 'UNIQUE' : 'INDEX', String(row.cols))
+      )
+    }
+    return list
   }
 
   if (scope === 'sequences') {

@@ -1,13 +1,13 @@
 <script setup lang="ts">
 /**
- * CalenNoteView —— 日历记事本页面
+ * CalenNoteView —— 记事本页面
  *
  * 职责：左侧日历 + 文件树管理（新建/重命名/删除），
  * 右侧将正在编辑的文件交给独立的 DotEditor 组件（富文本/Markdown 双视图），
  * 本页面只负责文件读取与自动保存，不再包含任何编辑器实现。
  */
 import { ref, computed, onMounted, nextTick, watch } from 'vue'
-import { ArrowLeft, ArrowRight, Plus, Delete, EditPen, Minus, Check } from '@element-plus/icons-vue'
+import { ArrowLeft, ArrowRight, Plus, Delete, EditPen, Minus, Check, Fold } from '@element-plus/icons-vue'
 import type { TabsPaneContext, RenderContentContext, TreeInstance, ElInput } from 'element-plus'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import BackHome from '../components/BackHome.vue'
@@ -17,6 +17,9 @@ import { getConfigWithDefault, getAppPath } from '../utils/config'
 const activeName = ref('common')
 const editNodeKey = ref('')
 const oldFileName = ref('')
+
+// === 左侧面板收起/展开（收起按钮位于面板右上角） ===
+const asideCollapsed = ref(false)
 
 // === 文件树 ===
 interface FileTreeNode {
@@ -437,11 +440,20 @@ watch(editorContent, () => {
 <template>
   <div class="calen-note-page">
     <el-container>
-      <el-aside>
-        <el-header>
-          <BackHome />
-          <el-text class="panel-title">日历记事本</el-text>
-        </el-header>
+      <el-aside :class="{ collapsed: asideCollapsed }">
+        <!-- 面板右上角：收起 / 展开按钮 -->
+        <el-button
+          class="aside-corner"
+          size="small"
+          :icon="asideCollapsed ? ArrowRight : Fold"
+          :title="asideCollapsed ? '展开左侧面板' : '收起左侧面板'"
+          @click="asideCollapsed = !asideCollapsed"
+        />
+        <template v-if="!asideCollapsed">
+          <el-header>
+            <BackHome />
+            <el-text class="panel-title">记事本</el-text>
+          </el-header>
         <div class="calendar-panel">
           <div class="calendar-header">
             <el-button link @click="prevMonth">
@@ -573,6 +585,13 @@ watch(editorContent, () => {
             </el-tab-pane>
           </el-tabs>
         </div>
+        </template>
+        <template v-else>
+          <!-- 收起态：窄条 -->
+          <div class="aside-collapsed-strip">
+            <span class="aside-collapsed-label">记事本</span>
+          </div>
+        </template>
       </el-aside>
       <el-main>
         <div class="editor-shell">
@@ -597,6 +616,9 @@ watch(editorContent, () => {
 <style scoped>
 .calen-note-page {
   height: 100vh;
+  background: var(--color-bg);
+  color: var(--color-text);
+  transition: background-color 0.3s;
 }
 
 .el-container {
@@ -604,11 +626,43 @@ watch(editorContent, () => {
 }
 
 .el-aside {
+  position: relative;
   width: 20%;
   min-width: 200px;
   display: flex;
   flex-direction: column;
   height: 100%;
+  transition: width 0.3s, min-width 0.3s;
+  box-sizing: border-box;
+}
+
+.el-aside.collapsed {
+  width: 44px;
+  min-width: 44px;
+  border-right: 1px solid var(--color-border);
+}
+
+/* 面板右上角：收起 / 展开按钮 */
+.aside-corner {
+  position: absolute;
+  top: 10px;
+  right: 8px;
+  z-index: 5;
+}
+
+.aside-collapsed-strip {
+  flex: 1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 48px;
+}
+
+.aside-collapsed-label {
+  font-size: 12px;
+  writing-mode: vertical-lr;
+  letter-spacing: 2px;
+  color: var(--color-text-secondary);
 }
 
 .el-aside .el-header {

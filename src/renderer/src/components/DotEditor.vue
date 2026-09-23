@@ -40,7 +40,7 @@ import {
   Back,
   Printer
 } from '@element-plus/icons-vue'
-import { useTheme } from '../composables/useTheme'
+import { useTheme, isDarkTheme } from '../composables/useTheme'
 import {
   ParagraphStyle,
   htmlToMarkdown,
@@ -377,7 +377,7 @@ const markdownText = ref('')
 const hasFile = computed(() => !!props.filePath)
 
 /** Markdown 编辑器主题（跟随全局主题） */
-const mdTheme = computed<'light' | 'dark'>(() => (theme.value === 'dark' ? 'dark' : 'light'))
+const mdTheme = computed<'light' | 'dark'>(() => (isDarkTheme(theme.value) ? 'dark' : 'light'))
 
 /** Markdown 内容同步父组件的防抖定时器 */
 let markdownSyncTimer: ReturnType<typeof setTimeout> | null = null

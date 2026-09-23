@@ -7,6 +7,7 @@
  * - executeLocalTool(id, args)：按 id 执行工具并返回结果文本
  */
 import { fetchWeather } from '../utils/weather'
+import { loadDay, saveDay, type DayMemo } from '../utils/memo'
 
 /** 工具参数说明 */
 export interface AiLocalToolParam {
@@ -89,6 +90,30 @@ function parseSearchResults(
     if (results.length >= limit) break
   }
   return results
+}
+
+/** 校验日期格式（yyyy-MM-dd），非法时抛错 */
+function argDate(args: Record<string, unknown>): string {
+  const date = argString(args, 'date')
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('日期格式应为 yyyy-MM-dd，如：2026-09-25')
+  return date
+}
+
+/** 校验时间格式（HH:mm），非法时抛错 */
+function argTime(args: Record<string, unknown>): string {
+  const time = argString(args, 'time')
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) throw new Error('时间格式应为 HH:mm，如：09:30')
+  return time
+}
+
+/** 备忘录条目格式化 */
+function formatMemoItems(items: DayMemo[]): string {
+  if (items.length === 0) return '（无备忘录）'
+  return items
+    .slice()
+    .sort((a, b) => a.time.localeCompare(b.time))
+    .map((m) => `${m.time} ${m.content}${m.reminded ? '（已提醒）' : ''}`)
+    .join('\n')
 }
 
 /** 内置工具列表 */
@@ -210,6 +235,72 @@ export const aiLocalTools: AiLocalTool[] = [
       }
       const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1]?.trim() ?? '（无标题）'
       return `来源：${source}\n标题：${title}\n\n${truncate(stripHtml(html))}`
+    }
+  },
+  {
+    id: 'calendar_memo',
+    name: '日历备忘录',
+    description:
+      '管理日历备忘录。action 取值：add（添加）、update（修改）、delete（删除）、list（查看）',
+    params: [
+      {
+        name: 'action',
+        description: '操作类型：add / update / delete / list',
+        required: true
+      },
+      { name: 'date', description: '日期，格式 yyyy-MM-dd，如：2026-09-25', required: true },
+      { name: 'time', description: '时间，格式 HH:mm，如：09:30（add/update/delete 必填）', required: false },
+      {
+        name: 'content',
+        description: '备忘内容（add/update 必填；update 时为新内容）',
+        required: false
+      },
+      {
+        name: 'old_time',
+        description: 'update/delete 时用于定位原条目的原时间（不传则按 time 匹配）',
+        required: false
+      }
+    ],
+    execute: async (args) => {
+      const action = argString(args, 'action').toLowerCase()
+      const date = argDate(args)
+      const items = await loadDay(date)
+
+      switch (action) {
+        case 'add': {
+          const time = argTime(args)
+          const content = argString(args, 'content')
+          if (items.some((m) => m.time === time && m.content === content)) {
+            return `${date} ${time} 已存在相同内容的备忘录`
+          }
+          items.push({ time, content })
+          await saveDay(date, items)
+          return `已在 ${date} 添加备忘录（${time} ${content}），到时间后首页将自动提示`
+        }
+        case 'update': {
+          const time = argTime(args)
+          const content = argString(args, 'content')
+          const oldTime = args.old_time ? argTime(args) : time
+          const target = items.find((m) => m.time === oldTime)
+          if (!target) return `${date} ${oldTime} 没有备忘录，无法修改`
+          target.time = time
+          target.content = content
+          await saveDay(date, items)
+          return `已修改 ${date} 的备忘录：${oldTime} → ${time} ${content}`
+        }
+        case 'delete': {
+          const time = argTime(args)
+          const remaining = items.filter((m) => m.time !== time)
+          if (remaining.length === items.length) return `${date} ${time} 没有备忘录，无需删除`
+          await saveDay(date, remaining)
+          return `已删除 ${date} ${time} 的备忘录（剩余 ${remaining.length} 条）`
+        }
+        case 'list': {
+          return `${date} 的备忘录：\n${formatMemoItems(items)}`
+        }
+        default:
+          throw new Error(`不支持的操作：${action}（可选 add / update / delete / list）`)
+      }
     }
   }
 ]

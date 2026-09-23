@@ -18,7 +18,7 @@ const { theme } = useTheme()
   box-sizing: border-box;
 }
 body {
-  background-color: var(--bg-color);
-  color: var(--text-color);
+  background-color: var(--color-bg);
+  color: var(--color-text);
 }
 </style>

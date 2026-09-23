@@ -170,7 +170,9 @@ onMounted(() => {
 }
 
 .panel-section {
-  max-width: 860px;
+  /* 大屏时占满更多宽度（上限 1280px），不再只占半屏 */
+  max-width: 1280px;
+  width: 100%;
 }
 
 .section-title {

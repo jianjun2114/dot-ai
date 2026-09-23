@@ -10,7 +10,7 @@
  *   两种传输方式（直连失败自动降级 SSE）
  * - SKILL：名称、描述、提示词内容
  */
-import { computed, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { Plus, Edit, Delete } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useSettings } from '../../composables/useSettings'
@@ -36,6 +36,22 @@ const { settings } = useSettings()
 
 /** 内置工具列表（只读展示） */
 const { tools: localTools } = useAiLocalTools()
+
+/** 内置工具参数行的完整文本 */
+function paramText(tool: { params: { name: string; required?: boolean; description: string }[] }): string {
+  return tool.params.length > 0
+    ? tool.params.map((p) => `${p.name}${p.required ? '*' : ''}（${p.description}）`).join('、')
+    : '无'
+}
+
+/** 参数悬浮提示开关：仅在文本被截断（看不全）时启用 */
+const paramTipDisabled = reactive<Record<string, boolean>>({})
+
+function checkParamTip(e: MouseEvent, toolId: string): void {
+  const info = e.currentTarget as HTMLElement
+  const span = info.querySelector<HTMLElement>('.config-meta:last-of-type')
+  paramTipDisabled[toolId] = !span || span.scrollWidth <= span.clientWidth
+}
 
 /** 当前子分类 */
 const activeType = ref<SmartConfigType>('llm')
@@ -479,18 +495,18 @@ const fetchMcpTools = async (): Promise<void> => {
         <span class="list-count">共 {{ localTools.length }} 项</span>
       </div>
       <div v-for="tool in localTools" :key="tool.id" class="config-item">
-        <div class="config-info">
+        <div class="config-info" @mouseenter="checkParamTip($event, tool.id)">
           <span class="config-name">{{ tool.name }}</span>
           <span class="config-meta">{{ tool.description }}</span>
-          <span class="config-meta">
-            参数：{{
-              tool.params.length > 0
-                ? tool.params
-                    .map((p) => `${p.name}${p.required ? '*' : ''}（${p.description}）`)
-                    .join('、')
-                : '无'
-            }}
-          </span>
+          <!-- 参数过长被截断时才允许悬浮提示 -->
+          <el-tooltip
+            :disabled="paramTipDisabled[tool.id]"
+            :content="paramText(tool)"
+            placement="top"
+            :show-after="300"
+          >
+            <span class="config-meta">参数：{{ paramText(tool) }}</span>
+          </el-tooltip>
         </div>
         <span class="builtin-badge">内置</span>
       </div>

@@ -5,11 +5,13 @@ import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-rou
 const PAGE_TITLES: Record<string, string> = {
   Home: '首页',
   Chat: '智能对话',
-  CalenNote: '日历记事本',
+  CalenNote: '记事本',
+  Calendar: '日历',
   Toolbox: '百宝箱',
   ToolboxApi: '接口测试',
   ToolboxDoc: '文档转换',
   ToolboxDocEdit: '文档编辑',
+  ToolboxDrawing: '画图',
   ToolboxShell: '终端 - 百宝箱',
   ToolboxBrowser: '浏览器 - 百宝箱',
   ToolboxDatabase: '数据库 - 百宝箱',
@@ -31,6 +33,12 @@ const routes: RouteRecordRaw[] = [
     path: '/calen-note',
     name: 'CalenNote',
     component: () => import('../views/CalenNoteView.vue')
+  },
+  {
+    // 日历备忘录（到时间后在首页提示）
+    path: '/calendar',
+    name: 'Calendar',
+    component: () => import('../views/CalendarView.vue')
   },
   {
     // 百宝箱主页（功能入口，子页面通过 router-view 渲染）
@@ -55,6 +63,12 @@ const routes: RouteRecordRaw[] = [
         path: 'doc-edit',
         name: 'ToolboxDocEdit',
         component: () => import('../views/toolbox/DocEditView.vue')
+      },
+      {
+        // 画图
+        path: 'drawing',
+        name: 'ToolboxDrawing',
+        component: () => import('../views/toolbox/DrawingView.vue')
       }
     ]
   },

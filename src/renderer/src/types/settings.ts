@@ -92,6 +92,8 @@ export interface SkillConfig {
 export interface AppSettings {
   /** 记事本根目录 */
   calendarNotesPath: string
+  /** 首页是否显示宜忌卡片（关闭时不显示也不调用 AI 获取建议） */
+  homeYiJiEnabled: boolean
   /** 在线文档编辑后端服务地址（如 http://192.168.31.178:8000） */
   docEditServerUrl: string
   /** 智能对话接口列表 */

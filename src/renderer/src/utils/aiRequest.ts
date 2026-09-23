@@ -17,10 +17,14 @@ import type { LlmApiFormat, LlmConfig } from '../types/settings'
 
 /* ================================ 类型定义 ================================ */
 
-/** 对话消息（OpenAI 兼容格式） */
+/** 多模态内容分片：文本 / 图片（data URL 或 http url） */
+export type LlmContentPart =
+  { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
+
+/** 对话消息（OpenAI 兼容格式）；content 支持纯文本或多模态分片数组 */
 export interface LlmMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'
-  content: string
+  content: string | LlmContentPart[]
 }
 
 /** 工具调用回合的扩展消息：assistant 携带 tool_calls / tool 返回结果 */
@@ -50,6 +54,33 @@ export interface LlmToolCall {
   arguments: string
 }
 
+/** token 用量统计 */
+export interface TokenUsage {
+  prompt_tokens?: number
+  completion_tokens?: number
+  total_tokens?: number
+}
+
+/**
+ * 统一封装的流式响应帧（跨 completions / messages / responses 三种协议规范化）：
+ * - reasoning_content 存在时表示思考帧，content 正文为空，finish 为空
+ * - content 正文有值时为正文帧，reasoning_content 为空，finish 为空
+ * - 正文流式结束后 finish = 'stop'，token 用量有值
+ * - 需要工具调用时 toolcalls 有值
+ */
+export interface LlmStreamChunk {
+  /** 正文增量（思考帧时为空字符串） */
+  content: string
+  /** 思考增量（存在时表示本帧为思考帧） */
+  reasoning_content: string
+  /** 结束状态：'' = 流式中；'stop' = 正文结束；'tool_calls' = 需要工具调用；'length' / 'error' 等 */
+  finish: string
+  /** token 用量（finish = 'stop' 时有值） */
+  token: TokenUsage | null
+  /** 工具调用增量（需要工具调用时有值） */
+  toolcalls: LlmToolCall[]
+}
+
 /** 大模型返回结果 */
 export interface LlmResult {
   /** 思考内容（模型返回 reasoning_content 时有值），未开启 think 时为空字符串 */
@@ -58,6 +89,10 @@ export interface LlmResult {
   content: string
   /** 模型发起的工具调用列表（未传入 tools 时为空数组） */
   toolCalls: LlmToolCall[]
+  /** 结束状态（流式 / completions 解析时有值）：stop / tool_calls / length 等 */
+  finish?: string
+  /** token 用量（finish = stop 时有值） */
+  token?: TokenUsage | null
 }
 
 /** sendLlm 可选项 */
@@ -134,7 +169,9 @@ function parseSsePayloads(raw: string): Record<string, unknown>[] {
 /** 解析非流式响应（标准 JSON，取首个 choice 的 message） */
 export function parseMessageResponse(data: string): LlmResult {
   const payload = JSON.parse(data) as {
+    usage?: TokenUsage
     choices?: Array<{
+      finish_reason?: string
       message?: {
         content?: string | null
         reasoning_content?: string
@@ -146,7 +183,8 @@ export function parseMessageResponse(data: string): LlmResult {
       }
     }>
   }
-  const message = payload.choices?.[0]?.message
+  const choice = payload.choices?.[0]
+  const message = choice?.message
   if (!message) throw new Error('大模型未返回有效内容')
   return {
     reasoning: message.reasoning_content ?? message.reasoning ?? '',
@@ -155,13 +193,17 @@ export function parseMessageResponse(data: string): LlmResult {
       id: tc.id ?? '',
       name: tc.function?.name ?? '',
       arguments: tc.function?.arguments ?? ''
-    }))
+    })),
+    finish: choice?.finish_reason ?? '',
+    token: payload.usage ?? null
   }
 }
 
-/** 流式响应单帧的结构（choices[0].delta） */
+/** 流式响应单帧的结构（choices[0]） */
 export interface StreamPayload {
+  usage?: TokenUsage
   choices?: Array<{
+    finish_reason?: string
     delta?: {
       content?: string
       reasoning_content?: string
@@ -179,27 +221,33 @@ export interface StreamPayload {
 function mergeStreamResponse(raw: string): LlmResult {
   let reasoning = ''
   let content = ''
+  let finish = ''
+  let token: TokenUsage | null = null
   const toolCalls: LlmToolCall[] = []
 
   for (const payload of parseSsePayloads(raw)) {
-    const delta = (payload as StreamPayload).choices?.[0]?.delta
-    if (!delta) continue
+    const choice = (payload as StreamPayload).choices?.[0]
+    const delta = choice?.delta
+    if (!delta && !choice) continue
 
-    const reasoningText = delta.reasoning_content ?? delta.reasoning ?? ''
+    const reasoningText = delta?.reasoning_content ?? delta?.reasoning ?? ''
     if (reasoningText) reasoning += reasoningText
-    if (delta.content) content += delta.content
+    if (delta?.content) content += delta.content
 
     // 工具调用按 index 增量拼接（id/name 首帧给出，arguments 分片到达）
-    for (const tc of delta.tool_calls ?? []) {
+    for (const tc of delta?.tool_calls ?? []) {
       const idx = tc.index ?? 0
       if (!toolCalls[idx]) toolCalls[idx] = { id: '', name: '', arguments: '' }
       if (tc.id) toolCalls[idx].id = tc.id
       if (tc.function?.name) toolCalls[idx].name += tc.function.name
       if (tc.function?.arguments) toolCalls[idx].arguments += tc.function.arguments
     }
+
+    if (choice?.finish_reason) finish = choice.finish_reason
+    token = (payload.usage as TokenUsage | undefined) ?? token
   }
 
-  return { reasoning, content: content.trim(), toolCalls }
+  return { reasoning, content: content.trim(), toolCalls: toolCalls.filter(Boolean), finish, token }
 }
 
 /* ================================ messages / responses 格式支持 ================================ */
@@ -220,6 +268,43 @@ export function normalizeLlmBase(baseUrl: string): string {
 }
 
 /**
+ * 按协议格式映射消息内容：纯文本直接返回；多模态分片按协议转换
+ * - completions：OpenAI 格式原样透传
+ * - responses：text → input_text，image_url → input_image
+ * - messages（Anthropic）：data URL 图片转 base64 source
+ */
+function mapContent(
+  content: string | LlmContentPart[],
+  format: 'completions' | 'messages' | 'responses'
+): unknown {
+  if (typeof content === 'string') return content
+  if (format === 'completions') return content
+  if (format === 'responses') {
+    return content.map((p) =>
+      p.type === 'text'
+        ? { type: 'input_text', text: p.text }
+        : { type: 'input_image', image_url: p.image_url.url }
+    )
+  }
+  return content.map((p) => {
+    if (p.type === 'text') return { type: 'text', text: p.text }
+    const m = /^data:(image\/[a-zA-Z+]+);base64,(.+)$/.exec(p.image_url.url)
+    if (m) return { type: 'image', source: { type: 'base64', media_type: m[1], data: m[2] } }
+    return { type: 'image', source: { type: 'url', url: p.image_url.url } }
+  })
+}
+
+/** 提取消息文本内容（多模态分片仅拼接 text 部分，用于合并 system 等） */
+function textOf(content: string | LlmContentPart[]): string {
+  return typeof content === 'string'
+    ? content
+    : content
+        .filter((p) => p.type === 'text')
+        .map((p) => p.text)
+        .join('\n')
+}
+
+/**
  * 组装 Anthropic messages 格式请求：
  * system 消息合并为顶层 system 参数，tool 角色按 user 处理（tool 协议仅在 completions 格式支持）
  */
@@ -232,7 +317,7 @@ function buildMessagesRequest(
 ): LlmRequest {
   const system = messages
     .filter((m) => m.role === 'system')
-    .map((m) => m.content)
+    .map((m) => textOf(m.content))
     .join('\n\n')
   return {
     url: `${base}/v1/messages`,
@@ -249,7 +334,10 @@ function buildMessagesRequest(
       ...(system ? { system } : {}),
       messages: messages
         .filter((m) => m.role !== 'system')
-        .map((m) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }))
+        .map((m) => ({
+          role: m.role === 'assistant' ? 'assistant' : 'user',
+          content: mapContent(m.content, 'messages')
+        }))
     }
   }
 }
@@ -271,7 +359,7 @@ function buildResponsesRequest(
       stream,
       input: messages.map((m) => ({
         role: m.role === 'assistant' ? 'assistant' : 'user',
-        content: m.content
+        content: mapContent(m.content, 'responses')
       }))
     }
   }
@@ -519,12 +607,18 @@ export interface SendLlmStreamOptions {
   temperature?: number
   /** 是否开启深度思考（仅 completions 格式支持，通过 chat_template_kwargs 透传） */
   think?: boolean
-  /** 正文增量回调（真实流式，逐帧触发） */
-  onContent?: (delta: string) => void
-  /** 思考内容增量回调（模型输出 reasoning_content / thinking 时触发） */
-  onReasoning?: (delta: string) => void
+  /**
+   * 统一格式流式帧回调：每帧数据规范化为
+   * { content, reasoning_content, finish, token, toolcalls }
+   * - reasoning_content 有值 = 思考帧（content 为空，finish 为空）
+   * - content 有值 = 正文帧（reasoning_content 为空，finish 为空）
+   * - finish = 'stop' 时正文结束且 token 有值；需要工具调用时 toolcalls 有值
+   */
+  onChunk?: (chunk: LlmStreamChunk) => void
   /** 取消信号：中止后停止接收并抛出 AbortError（渲染侧软中断，主进程请求自然结束） */
   signal?: AbortSignal
+  /** 流式空闲超时（毫秒）：超过该时长未收到任何数据帧则判定超时，默认 120000 */
+  idleTimeoutMs?: number
 }
 
 /** 流式请求自增序列（配合时间戳生成渲染进程侧唯一 requestId） */
@@ -542,14 +636,16 @@ function buildStreamRequest(
 ): LlmRequest {
   const base = normalizeLlmBase(llm.baseUrl)
   const format = getLlmApiFormat(llm)
-  console.log('think', think)
   const system = messages
     .filter((m) => m.role === 'system')
-    .map((m) => m.content)
+    .map((m) => textOf(m.content))
     .join('\n\n')
   const rest = messages
     .filter((m) => m.role !== 'system')
-    .map((m) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }))
+    .map((m) => ({
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      content: mapContent(m.content, format)
+    }))
 
   if (format === 'messages') {
     return {
@@ -591,6 +687,8 @@ function buildStreamRequest(
       stream: true,
       // 系统提示词必须放回 messages 首位（completions 协议无独立 system 字段）
       messages: system ? [{ role: 'system', content: system }, ...rest] : rest,
+      // 请求最终帧携带 token 用量（OpenAI 兼容约定，不支持的网关会忽略）
+      stream_options: { include_usage: true },
       // 深度思考开关（vLLM / Qwen 系约定）
       ...(think ? { chat_template_kwargs: { thinking: true } } : {})
     }
@@ -599,18 +697,19 @@ function buildStreamRequest(
 
 /**
  * 调用启用中的大模型（SSE 真实流式）：
- * 经主进程流式代理逐帧接收，按协议格式解析正文 / 思考增量并回调，结束后返回聚合结果。
- * 服务端不支持流式（返回普通 JSON）时自动按非流式解析。
+ * 经主进程流式代理逐帧接收，按协议格式解析后统一封装为
+ * { content, reasoning_content, finish, token, toolcalls } 帧结构并经 onChunk 回调，
+ * 结束后返回聚合结果。服务端不支持流式（返回普通 JSON）时自动按非流式解析。
  * @param messages 对话消息列表（含 system；工具协议由提示词承载）
- * @param options temperature / onContent / onReasoning
- * @returns 思考内容 + 回复正文的聚合结果（toolCalls 恒为空：工具走提示词协议）
+ * @param options temperature / onChunk / signal / idleTimeoutMs
+ * @returns 思考内容 + 回复正文 + 结束状态 + token 用量的聚合结果
  * @throws 未配置大模型、配置不完整或接口调用失败时抛出异常
  */
 export const sendLlmStream = async (
   messages: LlmChatMessage[],
   options: SendLlmStreamOptions = {}
 ): Promise<LlmResult> => {
-  const { temperature = 0.7, think = false, onContent, onReasoning, signal } = options
+  const { temperature = 0.7, think = false, onChunk, signal, idleTimeoutMs } = options
   const llm = getActiveLlm()
   if (!llm.baseUrl.trim() || !llm.model.trim()) {
     throw new Error(`大模型「${llm.name}」配置不完整，请补全接口地址与模型名称`)
@@ -625,10 +724,16 @@ export const sendLlmStream = async (
     let reasoning = ''
     let buffer = ''
     let settled = false
+    let finish = ''
+    let token: TokenUsage | null = null
+    const nativeToolCalls: LlmToolCall[] = []
+    /** 增量定位：messages 格式 block index → toolcalls 下标 */
+    const blockIdx = new Map<number, number>()
 
     const succeed = (result: LlmResult): void => {
       if (settled) return
       settled = true
+      clearIdle()
       signal?.removeEventListener('abort', onAbort)
       unsubscribeChunks()
       resolve(result)
@@ -636,6 +741,7 @@ export const sendLlmStream = async (
     const fail = (error: unknown): void => {
       if (settled) return
       settled = true
+      clearIdle()
       signal?.removeEventListener('abort', onAbort)
       unsubscribeChunks()
       reject(error instanceof Error ? error : new Error(String(error)))
@@ -646,47 +752,140 @@ export const sendLlmStream = async (
     signal?.addEventListener('abort', onAbort, { once: true })
     if (signal?.aborted) onAbort()
 
-    /** 消费一行 SSE 文本：按协议格式提取正文 / 思考增量并回调 */
+    /** 空闲看门狗：超过 idleTimeoutMs 未收到任何数据帧则判定流卡死，主动失败（可由上层重试） */
+    const idleMs = idleTimeoutMs ?? 120000
+    let idleTimer: ReturnType<typeof setTimeout> | null = null
+    const clearIdle = (): void => {
+      if (idleTimer) {
+        clearTimeout(idleTimer)
+        idleTimer = null
+      }
+    }
+    const resetIdle = (): void => {
+      clearIdle()
+      idleTimer = setTimeout(
+        () =>
+          fail(
+            new Error(
+              `流式响应超时：${Math.round(idleMs / 1000)} 秒未收到任何数据，请检查模型服务状态`
+            )
+          ),
+        idleMs
+      )
+    }
+    resetIdle()
+
+    /**
+     * 消费一行 SSE 文本：按协议格式解析后统一封装为
+     * { content, reasoning_content, finish, token, toolcalls } 帧结构回调
+     */
     const consumeSseLine = (line: string): void => {
       const trimmed = line.trim()
       if (!trimmed.startsWith('data:')) return
       const data = trimmed.slice(5).trim()
       if (!data || data === '[DONE]') return
-      // 调试：打印每帧原始数据（定位 reasoning / <think> 来源）
-      console.log('[llm] sse frame:', data)
       try {
         const payload = JSON.parse(data) as Record<string, unknown>
-        let contentDelta = ''
-        let reasoningDelta = ''
+        // 统一帧结构：思考帧 reasoning_content 有值（content 空、finish 空）；
+        // 正文帧 content 有值（reasoning_content 空、finish 空）；结束帧 finish + token
+        const chunk: LlmStreamChunk = {
+          content: '',
+          reasoning_content: '',
+          finish: '',
+          token: null,
+          toolcalls: []
+        }
         if (format === 'messages') {
           // Anthropic 事件流：content_block_delta（text_delta / thinking_delta）
-          if (payload.type === 'content_block_delta') {
-            const delta = payload.delta as { type?: string; text?: string; thinking?: string }
-            if (delta?.type === 'text_delta') contentDelta = delta.text ?? ''
-            else if (delta?.type === 'thinking_delta') reasoningDelta = delta.thinking ?? ''
+          if (payload.type === 'content_block_start') {
+            const block = (payload.content_block ?? {}) as {
+              type?: string
+              id?: string
+              name?: string
+            }
+            if (block.type === 'tool_use') {
+              blockIdx.set(payload.index as number, nativeToolCalls.length)
+              nativeToolCalls.push({ id: block.id ?? '', name: block.name ?? '', arguments: '' })
+            }
+          } else if (payload.type === 'content_block_delta') {
+            const delta = (payload.delta ?? {}) as {
+              type?: string
+              text?: string
+              thinking?: string
+              partial_json?: string
+            }
+            if (delta.type === 'text_delta') chunk.content = delta.text ?? ''
+            else if (delta.type === 'thinking_delta') chunk.reasoning_content = delta.thinking ?? ''
+            else if (delta.type === 'input_json_delta') {
+              const idx = blockIdx.get(payload.index as number)
+              if (idx !== undefined) {
+                nativeToolCalls[idx].arguments += delta.partial_json ?? ''
+                chunk.toolcalls.push({ ...nativeToolCalls[idx] })
+              }
+            }
+          } else if (payload.type === 'message_delta') {
+            // 结束帧：stop_reason 归一化（end_turn → stop / tool_use → tool_calls）
+            const delta = (payload.delta ?? {}) as { stop_reason?: string }
+            const reason = delta.stop_reason
+            finish =
+              reason === 'end_turn' ? 'stop' : reason === 'tool_use' ? 'tool_calls' : (reason ?? '')
+            token = (payload.usage as TokenUsage | undefined) ?? token
           }
         } else if (format === 'responses') {
           // OpenAI Responses 事件流：output_text.delta / reasoning_summary_text.delta
           if (payload.type === 'response.output_text.delta') {
-            contentDelta = (payload.delta as string) ?? ''
+            chunk.content = (payload.delta as string) ?? ''
           } else if (payload.type === 'response.reasoning_summary_text.delta') {
-            reasoningDelta = (payload.delta as string) ?? ''
+            chunk.reasoning_content = (payload.delta as string) ?? ''
+          } else if (payload.type === 'response.output_item.added') {
+            const item = (payload.item ?? {}) as {
+              type?: string
+              id?: string
+              call_id?: string
+              name?: string
+            }
+            if (item.type === 'function_call') {
+              nativeToolCalls.push({
+                id: item.call_id ?? item.id ?? '',
+                name: item.name ?? '',
+                arguments: ''
+              })
+            }
+          } else if (payload.type === 'response.function_call_arguments.delta') {
+            const last = nativeToolCalls[nativeToolCalls.length - 1]
+            if (last) {
+              last.arguments += (payload.delta as string) ?? ''
+              chunk.toolcalls.push({ ...last })
+            }
+          } else if (payload.type === 'response.completed') {
+            const resp = (payload.response ?? {}) as { usage?: TokenUsage }
+            finish = 'stop'
+            token = resp.usage ?? token
           }
         } else {
-          // OpenAI 兼容事件流：choices[0].delta.content / reasoning_content
-          const delta = (payload as StreamPayload).choices?.[0]?.delta
-          contentDelta = delta?.content ?? ''
-          // OpenAI 兼容流 reasoning 字段命名不一：reasoning_content（DeepSeek R1 等）/ reasoning（部分新模型）
-          reasoningDelta = delta?.reasoning_content ?? delta?.reasoning ?? ''
+          // OpenAI 兼容事件流：choices[0].delta.content / reasoning_content / tool_calls
+          const choice = (payload as StreamPayload).choices?.[0]
+          const delta = choice?.delta
+          chunk.content = delta?.content ?? ''
+          // 命名不一：reasoning_content（DeepSeek R1 等）/ reasoning（部分新模型）
+          chunk.reasoning_content = delta?.reasoning_content ?? delta?.reasoning ?? ''
+          for (const tc of delta?.tool_calls ?? []) {
+            const idx = tc.index ?? 0
+            if (!nativeToolCalls[idx]) nativeToolCalls[idx] = { id: '', name: '', arguments: '' }
+            if (tc.id) nativeToolCalls[idx].id = tc.id
+            if (tc.function?.name) nativeToolCalls[idx].name += tc.function.name
+            if (tc.function?.arguments) nativeToolCalls[idx].arguments += tc.function.arguments
+            chunk.toolcalls.push({ ...nativeToolCalls[idx] })
+          }
+          if (choice?.finish_reason) finish = choice.finish_reason
+          token = (payload.usage as TokenUsage | undefined) ?? token
         }
-        if (contentDelta) {
-          content += contentDelta
-          onContent?.(contentDelta)
-        }
-        // 深度思考关闭时不拼接 reasoning_content（服务端默认开启也忽略）
-        if (reasoningDelta && think) {
-          reasoning += reasoningDelta
-          onReasoning?.(reasoningDelta)
+        // 聚合
+        if (chunk.content) content += chunk.content
+        if (chunk.reasoning_content) reasoning += chunk.reasoning_content
+        // 有实际数据或为结束帧时回调（思考帧不受 think 开关限制，由调用方决定是否展示）
+        if (chunk.content || chunk.reasoning_content || chunk.toolcalls.length || chunk.finish) {
+          onChunk?.(chunk)
         }
       } catch {
         /* 跳过无法解析的行 */
@@ -696,6 +895,7 @@ export const sendLlmStream = async (
     // 先订阅 chunk 事件再发起请求，保证首帧不丢失
     const unsubscribeChunks = window.dot.toolbox.net.onHttpChunk((payload) => {
       if (payload.requestId !== requestId || settled) return
+      resetIdle() // 收到数据帧：重置空闲看门狗
       buffer += payload.chunk
       // 末行可能不完整（无换行符），留待下一帧拼接
       const lines = buffer.split('\n')
@@ -725,16 +925,35 @@ export const sendLlmStream = async (
         if (result.isSse) {
           // 冲洗残余缓冲（无换行符的末行）后聚合返回
           if (buffer.trim()) consumeSseLine(buffer)
-          // 调试：打印最终聚合的思考与正文
-          console.log('[llm] 聚合 reasoning:', reasoning)
-          console.log('[llm] 聚合 content:', content)
-          succeed({ reasoning, content: content.trim(), toolCalls: [] })
+          const finalFinish = finish || 'stop'
+          const finalResult: LlmResult = {
+            reasoning,
+            content: content.trim(),
+            toolCalls: nativeToolCalls.filter(Boolean),
+            finish: finalFinish,
+            token
+          }
+          // 结束帧：正文流结束后 finish = stop 且 token 有值（无工具调用时）
+          onChunk?.({
+            content: '',
+            reasoning_content: '',
+            finish: finalFinish,
+            token,
+            toolcalls: []
+          })
+          succeed(finalResult)
         } else {
           // 服务端忽略 stream 参数返回普通 JSON：按非流式解析
-          // 调试：打印非流式响应原文
-          console.log('[llm] 非流式响应原文:', result.body)
           try {
-            succeed(parseLlmResponse(format, result.body, false))
+            const parsed = parseLlmResponse(format, result.body, false)
+            onChunk?.({
+              content: '',
+              reasoning_content: '',
+              finish: parsed.finish ?? 'stop',
+              token: parsed.token ?? null,
+              toolcalls: []
+            })
+            succeed(parsed)
           } catch (e) {
             fail(e)
           }

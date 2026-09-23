@@ -2,7 +2,7 @@
 /**
  * 通用设置模块
  *
- * - 主题：亮色 / 暗色 / 复古黄 / 深蓝，四选一卡片（带色板预览）
+ * - 主题：亮色 / 暗色 / 六款新主题，卡片式选择（带色板预览）
  * - 记事本目录：通过系统目录选择器选取记事本根目录
  */
 import { ref } from 'vue'
@@ -38,16 +38,40 @@ const themeOptions: ThemeOption[] = [
     swatch: { bg: '#0f172a', card: '#252540', accent: '#0077DB', text: '#f0f0f5' }
   },
   {
-    value: 'retro',
-    label: '复古黄',
-    desc: '温暖怀旧',
-    swatch: { bg: '#fdf6e3', card: '#fef9e7', accent: '#d4a017', text: '#5c4b37' }
+    value: 'ink-blue',
+    label: '墨蓝轻奢',
+    desc: '稳重商务 · 暗色',
+    swatch: { bg: '#182230', card: '#1E2C3E', accent: '#C8A97E', text: '#E2E2E2' }
   },
   {
-    value: 'deep-blue',
-    label: '深蓝',
-    desc: '深邃沉稳',
-    swatch: { bg: '#0f172a', card: '#1e293b', accent: '#1e40af', text: '#e2e8f0' }
+    value: 'charcoal',
+    label: '炭灰极简',
+    desc: '清冷干净 · 暗色',
+    swatch: { bg: '#1E1E1E', card: '#262626', accent: '#526B78', text: '#DCDCDC' }
+  },
+  {
+    value: 'ink-green',
+    label: '护眼深绿',
+    desc: '沉静护眼 · 暗色',
+    swatch: { bg: '#1E2926', card: '#25322E', accent: '#98A89F', text: '#E0E5E3' }
+  },
+  {
+    value: 'mist-blue',
+    label: '雾桃粉',
+    desc: '干净柔和 · 浅色',
+    swatch: { bg: '#F5F0F1', card: '#FCF9FA', accent: '#B88C92', text: '#3A3032' }
+  },
+  {
+    value: 'earth-brown',
+    label: '暖棕大地',
+    desc: '温润新中式 · 浅色',
+    swatch: { bg: '#F3EEE6', card: '#FBF8F2', accent: '#5A483B', text: '#383029' }
+  },
+  {
+    value: 'gray-purple',
+    label: '灰紫静雅',
+    desc: '温柔小众 · 浅色',
+    swatch: { bg: '#F0EEF2', card: '#FAF9FB', accent: '#7D6F8C', text: '#36303D' }
   }
 ]
 
@@ -177,11 +201,24 @@ const chooseNotesDir = async (): Promise<void> => {
       </p>
     </div>
 
+    <!-- 首页宜忌 -->
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">首页宜忌</span>
+        <span class="card-desc">关闭后首页不显示宜忌卡片，也不会调用 AI 获取建议</span>
+      </div>
+      <el-switch
+        v-model="settings.homeYiJiEnabled"
+        active-text="显示"
+        inactive-text="隐藏"
+      />
+    </div>
+
     <!-- 记事本目录 -->
     <div class="card">
       <div class="card-header">
         <span class="card-title">记事本目录</span>
-        <span class="card-desc">日历记事本的数据存储根目录</span>
+        <span class="card-desc">记事本的数据存储根目录</span>
       </div>
       <div class="dir-row">
         <el-input

@@ -6,6 +6,10 @@ export interface ChatMessage {
   content: string
   timestamp: Date
   isStreaming?: boolean
+  /** 随消息发送的图片绝对路径（Cache/chat/pic/会话id/ 下，渲染时异步读取展示） */
+  images?: string[]
+  /** 随消息发送的文件绝对路径（Cache/chat/file/会话id/ 下） */
+  files?: string[]
 }
 
 export interface ChatSession {

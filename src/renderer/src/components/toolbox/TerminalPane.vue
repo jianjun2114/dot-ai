@@ -12,7 +12,7 @@ import { Terminal, type ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { ElMessage } from 'element-plus'
-import { useTheme } from '../../composables/useTheme'
+import { useTheme, isDarkTheme } from '../../composables/useTheme'
 import '@xterm/xterm/css/xterm.css'
 
 const props = defineProps<{
@@ -101,7 +101,7 @@ const withAlpha = (hex: string, alpha: number): string => {
 
 /** 根据当前主题变量构建 xterm 配色（暗色主题使用更亮的 ANSI 色板） */
 const buildTerminalTheme = (): ITheme => {
-  const isDark = theme.value === 'dark' || theme.value === 'deep-blue'
+  const isDark = isDarkTheme(theme.value)
   const bg = cssVar('--color-bg', '#1e1e2e')
   return {
     background: bg,
@@ -246,10 +246,10 @@ const copyLink = (): void => {
   emit('copy-link')
 }
 
-/** 右键菜单：清屏（向 shell 发送 Ctrl+L，由 shell 重绘提示符，兼容 bash / PowerShell） */
+/** 右键菜单：清屏（清空屏幕内容，保留滚动历史） */
 const clearScreen = (): void => {
   closeMenu()
-  window.dot.toolbox.shell.write(props.sessionId, '\x0c')
+  terminal?.clear()
 }
 
 /** 右键菜单：选中内容（无选中则取最近输出）发给 AI */

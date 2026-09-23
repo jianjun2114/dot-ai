@@ -1,17 +1,22 @@
 /* ========================================
    主题色板配置
    使用 data-theme 属性切换主题：
-   - light: 浅色主题
-   - dark: 深色主题
-   - retro: 复古黄主题
-   - deep-blue: 深蓝主题
+   - light: 亮色主题
+   - dark: 暗色主题
+   - ink-blue: 墨蓝轻奢（暗）
+   - charcoal: 炭灰极简（暗）
+   - ink-green: 护眼深绿（暗）
+   - mist-blue: 雾桃粉（浅）
+   - earth-brown: 暖棕大地（浅）
+   - gray-purple: 灰紫静雅（浅）
    ======================================== */
 
-/* 浅色主题 */
+/* 亮色主题 */
 :root {
   --color-primary: #0077DB;
   --color-primary-light: #4dabff;
   --color-primary-dark: #005a9e;
+  --color-accent: #4dabff;
   --color-bg: #f5f7fa;
   --color-card: #ffffff;
   --color-text: #1a1a2e;
@@ -33,8 +38,12 @@
   --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
 }
 
-/* 深色主题 */
+/* 暗色主题 */
 [data-theme="dark"] {
+  --color-primary: #0077DB;
+  --color-primary-light: #4dabff;
+  --color-primary-dark: #005a9e;
+  --color-accent: #7aa2f7;
   --color-bg: #0f172a;
   --color-card: #252540;
   --color-text: #f0f0f5;
@@ -56,56 +65,166 @@
   --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
 }
 
-/* 复古黄主题 */
-[data-theme="retro"] {
-  --color-primary: #d4a017;
-  --color-primary-light: #f0c850;
-  --color-primary-dark: #a6780f;
-  --color-bg: #fdf6e3;
-  --color-card: #fef9e7;
-  --color-text: #5c4b37;
-  --color-text-secondary: #8b7355;
-  --color-border: #e8dcc8;
-  --color-hover: #f5edd8;
-  --shadow-card: 0 2px 12px rgba(92, 75, 55, 0.1);
-  --shadow-card-hover: 0 8px 30px rgba(212, 160, 23, 0.2);
+/* 墨蓝轻奢（暗色 · 稳重商务） */
+[data-theme="ink-blue"] {
+  --color-primary: #2D4B73;
+  --color-primary-light: #4A6B9A;
+  --color-primary-dark: #1F3856;
+  --color-accent: #C8A97E;
+  --color-bg: #182230;
+  --color-card: #1E2C3E;
+  --color-text: #E2E2E2;
+  --color-text-secondary: #949BA5;
+  --color-border: #2A3B50;
+  --color-hover: #24334A;
+  --shadow-card: 0 2px 12px rgba(0, 0, 0, 0.35);
+  --shadow-card-hover: 0 8px 30px rgba(200, 169, 126, 0.18);
   /* 语义状态色 */
-  --color-success: #7a9a3d;
-  --color-warning: #c47f17;
-  --color-danger: #b0432f;
-  /* 弹窗遮罩 */
-  --color-mask: rgba(92, 75, 55, 0.45);
-  /* 磨砂玻璃效果 */
-  --glass-bg: rgba(253, 246, 227, 0.6);
-  --glass-blur: blur(15px);
-  --glass-border: rgba(212, 160, 23, 0.3);
-  --glass-shadow: 0 8px 32px rgba(92, 75, 55, 0.15);
-}
-
-/* 深蓝主题 */
-[data-theme="deep-blue"] {
-  --color-primary: #1e40af;
-  --color-primary-light: #3b82f6;
-  --color-primary-dark: #1e3a8a;
-  --color-bg: #0f172a;
-  --color-card: #1e293b;
-  --color-text: #e2e8f0;
-  --color-text-secondary: #94a3b8;
-  --color-border: #334155;
-  --color-hover: #1e293b;
-  --shadow-card: 0 2px 12px rgba(0, 0, 0, 0.4);
-  --shadow-card-hover: 0 8px 30px rgba(30, 64, 175, 0.3);
-  /* 语义状态色 */
-  --color-success: #4ade80;
-  --color-warning: #facc15;
+  --color-success: #34d399;
+  --color-warning: #fbbf24;
   --color-danger: #f87171;
   /* 弹窗遮罩 */
-  --color-mask: rgba(2, 6, 23, 0.65);
+  --color-mask: rgba(10, 18, 28, 0.6);
   /* 磨砂玻璃效果 */
-  --glass-bg: rgba(15, 23, 42, 0.6);
+  --glass-bg: rgba(24, 34, 48, 0.6);
   --glass-blur: blur(12px);
-  --glass-border: rgba(59, 130, 246, 0.2);
-  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  --glass-border: rgba(200, 169, 126, 0.18);
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+}
+
+/* 炭灰极简（暗色 · 清冷干净） */
+[data-theme="charcoal"] {
+  --color-primary: #526B78;
+  --color-primary-light: #74909F;
+  --color-primary-dark: #3C525C;
+  --color-accent: #8C8C8C;
+  --color-bg: #1E1E1E;
+  --color-card: #262626;
+  --color-text: #DCDCDC;
+  --color-text-secondary: #858585;
+  --color-border: #333333;
+  --color-hover: #2B2B2B;
+  --shadow-card: 0 2px 12px rgba(0, 0, 0, 0.35);
+  --shadow-card-hover: 0 8px 30px rgba(116, 144, 159, 0.2);
+  /* 语义状态色 */
+  --color-success: #34d399;
+  --color-warning: #fbbf24;
+  --color-danger: #f87171;
+  /* 弹窗遮罩 */
+  --color-mask: rgba(0, 0, 0, 0.6);
+  /* 磨砂玻璃效果 */
+  --glass-bg: rgba(30, 30, 30, 0.6);
+  --glass-blur: blur(12px);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+}
+
+/* 护眼深绿（暗色 · 沉静护眼，适合代码/文档） */
+[data-theme="ink-green"] {
+  --color-primary: #487062;
+  --color-primary-light: #6A9184;
+  --color-primary-dark: #38564C;
+  --color-accent: #98A89F;
+  --color-bg: #1E2926;
+  --color-card: #25322E;
+  --color-text: #E0E5E3;
+  --color-text-secondary: #84928D;
+  --color-border: #2E3C38;
+  --color-hover: #2A3833;
+  --shadow-card: 0 2px 12px rgba(0, 0, 0, 0.3);
+  --shadow-card-hover: 0 8px 30px rgba(152, 168, 159, 0.18);
+  /* 语义状态色 */
+  --color-success: #34d399;
+  --color-warning: #fbbf24;
+  --color-danger: #f87171;
+  /* 弹窗遮罩 */
+  --color-mask: rgba(11, 18, 16, 0.6);
+  /* 磨砂玻璃效果 */
+  --glass-bg: rgba(30, 41, 38, 0.6);
+  --glass-blur: blur(12px);
+  --glass-border: rgba(152, 168, 159, 0.18);
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+}
+
+/* 雾桃粉（浅色 · 干净柔和） */
+[data-theme="mist-blue"] {
+  --color-primary: #B88C92;
+  --color-primary-light: #CFAAB0;
+  --color-primary-dark: #9C7077;
+  --color-accent: #D8C1C4;
+  --color-bg: #F5F0F1;
+  --color-card: #FCF9FA;
+  --color-text: #3A3032;
+  --color-text-secondary: #8A777A;
+  --color-border: #E6DCDE;
+  --color-hover: #EFE6E8;
+  --shadow-card: 0 2px 12px rgba(58, 48, 50, 0.08);
+  --shadow-card-hover: 0 8px 30px rgba(184, 140, 146, 0.22);
+  /* 语义状态色 */
+  --color-success: #16a34a;
+  --color-warning: #d97706;
+  --color-danger: #dc2626;
+  /* 弹窗遮罩 */
+  --color-mask: rgba(58, 48, 50, 0.45);
+  /* 磨砂玻璃效果 */
+  --glass-bg: rgba(245, 240, 241, 0.6);
+  --glass-blur: blur(15px);
+  --glass-border: rgba(216, 193, 196, 0.4);
+  --glass-shadow: 0 8px 32px rgba(58, 48, 50, 0.12);
+}
+
+/* 暖棕大地（浅色 · 温润新中式） */
+[data-theme="earth-brown"] {
+  --color-primary: #5A483B;
+  --color-primary-light: #7C675A;
+  --color-primary-dark: #45362C;
+  --color-accent: #B8A796;
+  --color-bg: #F3EEE6;
+  --color-card: #FBF8F2;
+  --color-text: #383029;
+  --color-text-secondary: #7A6F65;
+  --color-border: #E3DACB;
+  --color-hover: #EAE3D5;
+  --shadow-card: 0 2px 12px rgba(56, 48, 41, 0.08);
+  --shadow-card-hover: 0 8px 30px rgba(90, 72, 59, 0.18);
+  /* 语义状态色 */
+  --color-success: #16a34a;
+  --color-warning: #d97706;
+  --color-danger: #dc2626;
+  /* 弹窗遮罩 */
+  --color-mask: rgba(56, 48, 41, 0.45);
+  /* 磨砂玻璃效果 */
+  --glass-bg: rgba(243, 238, 230, 0.6);
+  --glass-blur: blur(15px);
+  --glass-border: rgba(184, 167, 150, 0.35);
+  --glass-shadow: 0 8px 32px rgba(56, 48, 41, 0.12);
+}
+
+/* 灰紫静雅（浅色 · 温柔小众） */
+[data-theme="gray-purple"] {
+  --color-primary: #7D6F8C;
+  --color-primary-light: #9C90A9;
+  --color-primary-dark: #655873;
+  --color-accent: #B8AEC2;
+  --color-bg: #F0EEF2;
+  --color-card: #FAF9FB;
+  --color-text: #36303D;
+  --color-text-secondary: #82798B;
+  --color-border: #E0DBE4;
+  --color-hover: #E7E3EA;
+  --shadow-card: 0 2px 12px rgba(54, 48, 61, 0.08);
+  --shadow-card-hover: 0 8px 30px rgba(125, 111, 140, 0.2);
+  /* 语义状态色 */
+  --color-success: #16a34a;
+  --color-warning: #d97706;
+  --color-danger: #dc2626;
+  /* 弹窗遮罩 */
+  --color-mask: rgba(54, 48, 61, 0.45);
+  /* 磨砂玻璃效果 */
+  --glass-bg: rgba(240, 238, 242, 0.6);
+  --glass-blur: blur(15px);
+  --glass-border: rgba(184, 174, 194, 0.35);
+  --glass-shadow: 0 8px 32px rgba(54, 48, 61, 0.12);
 }
 
 /* ========================================
@@ -152,21 +271,21 @@ body {
    使 el-input / el-tree / el-tabs 等组件
    在全部主题下颜色一致。
    ======================================== */
-:root,
-:root[data-theme='light'],
-:root[data-theme='dark'],
-:root[data-theme='retro'],
-:root[data-theme='deep-blue'] {
+:root {
   /* 表面背景 */
   --el-bg-color: var(--color-card);
   --el-bg-color-page: var(--color-bg);
   --el-bg-color-overlay: var(--color-card);
+  --el-fill-color: var(--color-hover);
   --el-fill-color-blank: var(--color-card);
   --el-fill-color-light: var(--color-hover);
+  --el-fill-color-lighter: var(--color-hover);
   /* 文本 */
+  --el-text-color: var(--color-text);
   --el-text-color-primary: var(--color-text);
   --el-text-color-regular: var(--color-text);
   --el-text-color-secondary: var(--color-text-secondary);
+  --el-text-color-placeholder: var(--color-text-secondary);
   /* 边框 */
   --el-border-color: var(--color-border);
   --el-border-color-light: var(--color-border);

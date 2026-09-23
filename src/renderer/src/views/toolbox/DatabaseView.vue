@@ -84,6 +84,16 @@ interface ColumnInfo {
   comment?: string
 }
 
+/** 索引/约束元信息（表结构 tab 的索引/外键/唯一键展示） */
+interface IndexInfo {
+  name: string
+  kind: 'INDEX' | 'UNIQUE' | 'FOREIGN'
+  /** 逗号分隔的字段列表（按列序） */
+  columns: string
+  refTable?: string
+  refColumns?: string
+}
+
 type GroupKind = 'tables' | 'views' | 'sequences' | 'procedures'
 
 interface TreeNode {
@@ -725,11 +735,31 @@ interface StructureState {
   database?: string
   schema?: string
   columns: ColumnInfo[]
+  indexes: IndexInfo[]
   loading: boolean
 }
 
 const structure = ref<StructureState | null>(null)
 const structureOpen = ref(false)
+
+/** 表结构 tab 内部子页：字段 / 索引 / 外键 / 唯一键 */
+type StructSubTab = 'fields' | 'indexes' | 'fks' | 'uks'
+const structSubTab = ref<StructSubTab>('fields')
+const structSubTabs: { key: StructSubTab; label: string }[] = [
+  { key: 'fields', label: '字段' },
+  { key: 'indexes', label: '索引' },
+  { key: 'fks', label: '外键' },
+  { key: 'uks', label: '唯一键' }
+]
+const structIndexRows = computed(
+  (): IndexInfo[] => structure.value?.indexes.filter((i) => i.kind === 'INDEX') ?? []
+)
+const structFkRows = computed(
+  (): IndexInfo[] => structure.value?.indexes.filter((i) => i.kind === 'FOREIGN') ?? []
+)
+const structUkRows = computed(
+  (): IndexInfo[] => structure.value?.indexes.filter((i) => i.kind === 'UNIQUE') ?? []
+)
 
 /** 序列信息 tab（类似表结构 tab，仅展示序列属性，无 SQL 编辑器） */
 interface SequenceState {
@@ -887,12 +917,14 @@ const showStructure = async (node: TreeNode): Promise<void> => {
   editorMode.value = 'structure'
   structureOpen.value = true
   cancelStructEdit()
+  structSubTab.value = 'fields'
   structure.value = {
     table: node.name,
     isView: node.nodeType === 'view',
     database: node.database,
     schema: node.schema,
     columns: [],
+    indexes: [],
     loading: true
   }
   try {
@@ -906,6 +938,17 @@ const showStructure = async (node: TreeNode): Promise<void> => {
     ElMessage.error(`加载表结构失败：${(e as Error).message}`)
   } finally {
     if (structure.value) structure.value.loading = false
+  }
+  // 索引/外键/唯一键异步加载，失败不影响字段展示
+  try {
+    const idx = (await dbApi.catalog(conn.connId, 'indexes', {
+      database: node.database,
+      schema: node.schema,
+      table: node.name
+    })) as IndexInfo[]
+    if (structure.value && structure.value.table === node.name) structure.value.indexes = idx
+  } catch (e) {
+    ElMessage.error(`加载索引信息失败：${(e as Error).message}`)
   }
 }
 
@@ -2144,6 +2187,40 @@ const openAiAssist = (): void => {
   aiAssistVisible.value = true
 }
 
+/** 获取 SQL 的执行计划文本（失败返回错误说明，不抛出） */
+const fetchExplainPlan = async (sql: string): Promise<string> => {
+  const conn = active.value
+  if (!conn) return '（无可用连接）'
+  const queryId = `plan_${Date.now()}`
+  try {
+    if (isOracleKind(conn.kind)) {
+      await dbApi.query(conn.connId, `EXPLAIN PLAN FOR ${sql}`, queryId, selectedDb.value)
+      const r = await dbApi.query(
+        conn.connId,
+        'SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY)',
+        queryId,
+        selectedDb.value
+      )
+      return buildOraclePlanText(r)
+    }
+    const r = await dbApi.query(conn.connId, `EXPLAIN ${sql}`, queryId, selectedDb.value)
+    return buildMysqlPlanText(r)
+  } catch (e) {
+    return `（执行计划获取失败：${(e as Error).message}）`
+  }
+}
+
+/** 从 JSON 文本中提取首个 JSON 对象（容忍 markdown 代码块包裹） */
+const parseAiJson = (text: string): Record<string, unknown> | null => {
+  const m = /\{[\s\S]*\}/.exec(text)
+  if (!m) return null
+  try {
+    return JSON.parse(m[0]) as Record<string, unknown>
+  } catch {
+    return null
+  }
+}
+
 const sendAiAssist = async (): Promise<void> => {
   const conn = active.value
   const instruction = aiAssistInstruction.value.trim()
@@ -2151,9 +2228,121 @@ const sendAiAssist = async (): Promise<void> => {
     ElMessage.warning('请输入指令')
     return
   }
-  const kindLabel = KIND_OPTIONS.find((o) => o.value === conn?.kind)?.label ?? conn?.kind ?? 'SQL'
+  if (!conn) return
+  const kindLabel = KIND_OPTIONS.find((o) => o.value === conn.kind)?.label ?? conn.kind ?? 'SQL'
   aiAssistRunning.value = true
   try {
+    // 第一步：让 AI 判断处理该 SQL 是否需要表结构 / 索引 / 执行计划，并列出涉及的表（JSON 输出，校验失败自动重试）
+    const planPrompt =
+      `你是数据库专家。当前数据库类型：${kindLabel}` +
+      (selectedDb.value ? `，当前数据库/Schema：${selectedDb.value}` : '') +
+      `。用户指令：${instruction}\n` +
+      `SQL：\n${aiAssistSql.value}\n\n` +
+      `判断完成该指令是否需要以下信息，并从 SQL 中提取涉及的表名（不含别名、不含 Schema 前缀）。` +
+      `只输出一个 JSON 对象，不要输出任何其他内容，格式：\n` +
+      `{"needStructure": true|false, "needIndexes": true|false, "needExplain": true|false, "tables": ["表名1","表名2"]}`
+    let needStructure = false
+    let needIndexes = false
+    let needExplain = false
+    let tables: string[] = []
+    for (let round = 0; round < 3; round++) {
+      const r = await sendLlm(
+        [
+          {
+            role: 'system',
+            content: '你是数据库专家，必须只返回严格的 JSON 对象，不能包含任何解释文字。'
+          },
+          { role: 'user', content: planPrompt }
+        ],
+        { temperature: 0 }
+      )
+      const obj = parseAiJson(r.content)
+      if (obj && Array.isArray(obj.tables)) {
+        needStructure = obj.needStructure === true
+        needIndexes = obj.needIndexes === true
+        needExplain = obj.needExplain === true
+        tables = (obj.tables as unknown[]).map(String).filter(Boolean)
+        break
+      }
+    }
+    if (tables.length === 0) {
+      // AI 未给出表名时的兜底：正则提取 FROM/JOIN/INTO/UPDATE 后的表名
+      const re = /\b(?:FROM|JOIN|INTO|UPDATE)\s+[`"[]?([A-Za-z_][\w$]*)[`"\]]?/gi
+      const found = new Set<string>()
+      let m: RegExpExecArray | null
+      while ((m = re.exec(aiAssistSql.value))) found.add(m[1])
+      tables = [...found]
+    }
+
+    // 第二步：按需获取表结构 / 索引 / 执行计划（失败不影响后续优化）
+    let ctx = ''
+    if ((needStructure || needIndexes) && tables.length > 0) {
+      const parts: string[] = []
+      for (const t of tables.slice(0, 10)) {
+        let colText = ''
+        let idxText = ''
+        try {
+          if (needStructure) {
+            const cols = (await dbApi.catalog(conn.connId, 'columns', {
+              database: selectedDb.value,
+              schema: selectedDb.value,
+              table: t
+            })) as {
+              name: string
+              dataType: string
+              length?: string
+              nullable: boolean
+              pk: boolean
+              comment?: string
+            }[]
+            colText = cols.length
+              ? cols
+                  .map(
+                    (c) =>
+                      `- ${c.name} ${c.dataType.toUpperCase()}${c.length ? `(${c.length})` : ''} ${
+                        c.nullable ? 'NULL' : 'NOT NULL'
+                      }${c.pk ? ' 主键' : ''}${c.comment ? ` -- ${c.comment}` : ''}`
+                  )
+                  .join('\n')
+              : '（未找到该表字段）'
+          }
+          if (needIndexes) {
+            const idxs = (await dbApi.catalog(conn.connId, 'indexes', {
+              database: selectedDb.value,
+              schema: selectedDb.value,
+              table: t
+            })) as {
+              name: string
+              kind: string
+              columns: string
+              refTable?: string
+              refColumns?: string
+            }[]
+            idxText = idxs.length
+              ? idxs
+                  .map(
+                    (i) =>
+                      `- [${i.kind}] ${i.name}(${i.columns})${
+                        i.kind === 'FOREIGN' && i.refTable
+                          ? ` 引用 ${i.refTable}(${i.refColumns ?? ''})`
+                          : ''
+                      }`
+                  )
+                  .join('\n')
+              : '（无索引/约束）'
+          }
+        } catch (e) {
+          idxText = `（元数据获取失败：${(e as Error).message}）`
+        }
+        parts.push(`■ 表 ${t}\n${colText}\n${idxText}`)
+      }
+      ctx += `\n\n【相关表元数据】\n${parts.join('\n\n')}`
+    }
+    if (needExplain) {
+      ctx += `\n\n【执行计划】\n${await fetchExplainPlan(aiAssistSql.value)}`
+    }
+
+    // 第三步：携带上下文执行主任务
     const r = await sendLlm(
       [
         {
@@ -2162,9 +2351,17 @@ const sendAiAssist = async (): Promise<void> => {
             `你是资深数据库专家（DBA）。当前数据库类型：${kindLabel}` +
             (selectedDb.value ? `，当前数据库/Schema：${selectedDb.value}` : '') +
             `。请根据用户指令对给出的 SQL 进行处理（如优化、分析、改写、解释等）。` +
-            `用中文回答，思路简洁分点；如给出修改后的 SQL，必须用 \`\`\`sql 代码块包裹。`
+            (ctx ? `回答时可参考给出的表结构/索引/执行计划等元数据。` : ``) +
+            `用中文回答，思路简洁分点。` +
+            `如给出修改后的 SQL，必须用 \`\`\`sql 代码块包裹，并遵守：\n` +
+            `1. 在 SQL 中对应位置用注释（--）标注优化点，说明此处做了什么优化；\n` +
+            `2. 无法在该 SQL 上优化的问题（如缺少索引、需要改表结构、需要业务侧配合等），` +
+            `必须在 SQL 最上方用块注释（/* ... */）说明原因和建议。`
         },
-        { role: 'user', content: `指令：${instruction}\n\nSQL：\n${aiAssistSql.value}` }
+        {
+          role: 'user',
+          content: `指令：${instruction}\n\nSQL：\n${aiAssistSql.value}${ctx}`
+        }
       ],
       { temperature: 0.3 }
     )
@@ -2911,7 +3108,28 @@ onBeforeUnmount(() => {
                     </template>
                   </span>
                 </div>
+                <!-- 子页切换：字段 / 索引 / 外键 / 唯一键 -->
+                <div class="struct-subtabs">
+                  <span
+                    v-for="st in structSubTabs"
+                    :key="st.key"
+                    class="struct-subtab"
+                    :class="{ active: structSubTab === st.key }"
+                    @click="structSubTab = st.key"
+                  >
+                    {{
+                      st.key === 'fields'
+                        ? `字段 ${structure.columns.length}`
+                        : st.key === 'indexes'
+                          ? `索引 ${structIndexRows.length}`
+                          : st.key === 'fks'
+                            ? `外键 ${structFkRows.length}`
+                            : `唯一键 ${structUkRows.length}`
+                    }}
+                  </span>
+                </div>
                 <el-table
+                  v-if="structSubTab === 'fields'"
                   v-loading="structure.loading"
                   :data="structure.columns"
                   border
@@ -2995,6 +3213,112 @@ onBeforeUnmount(() => {
                     </template>
                   </el-table-column>
                   <template #empty>暂无字段</template>
+                </el-table>
+                <!-- 索引列表 -->
+                <el-table
+                  v-else-if="structSubTab === 'indexes'"
+                  v-loading="structure.loading"
+                  :data="structIndexRows"
+                  border
+                  stripe
+                  height="100%"
+                  size="small"
+                  class="data-table"
+                >
+                  <el-table-column type="index" label="#" width="56" />
+                  <el-table-column
+                    prop="name"
+                    label="索引名"
+                    min-width="200"
+                    show-overflow-tooltip
+                  />
+                  <el-table-column
+                    prop="columns"
+                    label="字段"
+                    min-width="240"
+                    show-overflow-tooltip
+                  >
+                    <template #default="{ row }">
+                      <span class="idx-cols">{{ row.columns }}</span>
+                    </template>
+                  </el-table-column>
+                  <template #empty>暂无索引</template>
+                </el-table>
+                <!-- 外键列表 -->
+                <el-table
+                  v-else-if="structSubTab === 'fks'"
+                  v-loading="structure.loading"
+                  :data="structFkRows"
+                  border
+                  stripe
+                  height="100%"
+                  size="small"
+                  class="data-table"
+                >
+                  <el-table-column type="index" label="#" width="56" />
+                  <el-table-column
+                    prop="name"
+                    label="外键名"
+                    min-width="200"
+                    show-overflow-tooltip
+                  />
+                  <el-table-column
+                    prop="columns"
+                    label="本表字段"
+                    min-width="180"
+                    show-overflow-tooltip
+                  >
+                    <template #default="{ row }">
+                      <span class="idx-cols">{{ row.columns }}</span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column
+                    prop="refTable"
+                    label="引用表"
+                    min-width="160"
+                    show-overflow-tooltip
+                  />
+                  <el-table-column
+                    prop="refColumns"
+                    label="引用字段"
+                    min-width="180"
+                    show-overflow-tooltip
+                  >
+                    <template #default="{ row }">
+                      <span class="idx-cols">{{ row.refColumns || '-' }}</span>
+                    </template>
+                  </el-table-column>
+                  <template #empty>暂无外键</template>
+                </el-table>
+                <!-- 唯一键列表 -->
+                <el-table
+                  v-else
+                  v-loading="structure.loading"
+                  :data="structUkRows"
+                  border
+                  stripe
+                  height="100%"
+                  size="small"
+                  class="data-table"
+                >
+                  <el-table-column type="index" label="#" width="56" />
+                  <el-table-column
+                    prop="name"
+                    label="唯一键名"
+                    min-width="200"
+                    show-overflow-tooltip
+                  />
+                  <el-table-column
+                    prop="columns"
+                    label="字段"
+                    min-width="240"
+                    show-overflow-tooltip
+                  >
+                    <template #default="{ row }">
+                      <span class="idx-cols">{{ row.columns }}</span>
+                    </template>
+                  </el-table-column>
+                  <template #empty>暂无唯一键</template>
                 </el-table>
               </div>
 
@@ -3855,6 +4179,39 @@ onBeforeUnmount(() => {
   gap: 8px;
   padding-bottom: 8px;
   font-size: 13px;
+}
+
+/* 表结构子页切换：字段 / 索引 / 外键 / 唯一键 */
+.struct-subtabs {
+  display: flex;
+  gap: 4px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-border, #ddd);
+}
+
+.struct-subtab {
+  padding: 3px 12px;
+  font-size: 12px;
+  color: var(--color-text-secondary, #666);
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.struct-subtab:hover {
+  background: var(--color-bg-hover, rgba(0, 0, 0, 0.04));
+  color: var(--color-text, #333);
+}
+
+.struct-subtab.active {
+  background: var(--el-color-primary-light-9, #ecf5ff);
+  color: var(--el-color-primary, #409eff);
+  font-weight: 600;
+}
+
+.idx-cols {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
 }
 
 .col-count {

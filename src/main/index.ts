@@ -95,7 +95,7 @@ app.whenReady().then(() => {
     if (!fs.existsSync(newConfigFile) && fs.existsSync(oldConfigFile)) {
       try {
         fs.copyFileSync(oldConfigFile, newConfigFile)
-        // 迁移日历记事本等用户数据目录（如果存在）
+        // 迁移记事本等用户数据目录（如果存在）
         const oldNotesDir = join(userDataDir, 'calendarNotes')
         const newNotesDir = join(installDir, 'calendarNotes')
         if (fs.existsSync(oldNotesDir) && !fs.existsSync(newNotesDir)) {
@@ -241,6 +241,18 @@ app.whenReady().then(() => {
           return fs.readFileSync(filePath).toString('base64')
         } catch {
           return null
+        }
+      }
+      case 'write-base64': {
+        // 以 base64 写入二进制文件（图片等），目录不存在自动创建
+        const [filePath, base64] = args as [string, string]
+        try {
+          const dir = join(filePath, '..')
+          if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+          fs.writeFileSync(filePath, Buffer.from(base64, 'base64'))
+          return true
+        } catch {
+          return false
         }
       }
       case 'rename': {

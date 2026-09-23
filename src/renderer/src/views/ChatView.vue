@@ -1,12 +1,16 @@
 <script setup lang="ts">
-import { ref, onMounted, nextTick, computed } from 'vue'
+import { ref, onMounted, nextTick, computed, reactive, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Plus, Delete, Edit, Fold, Expand, Promotion, HomeFilled } from '@element-plus/icons-vue'
+import { Plus, Delete, Edit, Fold, Expand, Promotion, HomeFilled, Avatar } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useSettings } from '../composables/useSettings'
 import { useChatSessions } from '../composables/useChatSessions'
 import { chat, ensureEndpointLogin } from '../composables/aichat'
+import { getAppPath } from '../utils/config'
 import AssistantMessage from '../components/AssistantMessage.vue'
+import fujianSvg from '../assets/fujian.svg'
+import sikaoSvg from '../assets/sikao.svg'
+import sikaoHuiSvg from '../assets/sikao_hui.svg'
 
 const route = useRoute()
 const router = useRouter()
@@ -58,6 +62,172 @@ const currentStreamingId = ref<number | null>(null)
 // 当前请求的中止控制器：停止生成时真实断开（ws 模式）/ 丢弃结果（http/local 模式）
 let currentController: AbortController | null = null
 
+/* ================================ 智能体选择 / 深度思考 ================================ */
+
+/** 深度思考开关（随请求透传，仅部分模型支持） */
+const deepThink = ref(false)
+
+/** 当前选择的智能体：'chat' = 默认对话（使用启用中的对话接口），否则为接口 id */
+const selectedAgentId = ref('chat')
+
+/** 智能体展示名：默认「对话」，选中接口时显示接口名 */
+const agentName = computed(() => {
+  if (selectedAgentId.value === 'chat') return '对话'
+  return settings.value.chatEndpoints.find((e) => e.id === selectedAgentId.value)?.name ?? '对话'
+})
+
+/** 切换智能体：切换启用中的对话接口（chat() 使用启用中的接口） */
+const selectAgent = (id: string | number): void => {
+  const target = String(id)
+  if (target !== 'chat' && !settings.value.chatEndpoints.some((e) => e.id === target)) return
+  selectedAgentId.value = target
+  settings.value.chatEndpoints = settings.value.chatEndpoints.map((e) => ({
+    ...e,
+    enabled: target === 'chat' ? e.enabled : e.id === target
+  }))
+}
+
+/* ================================ 附件（图片 / 文件） ================================ */
+
+/** 待发送图片：name 原文件名 / path 持久化路径（Cache/chat/pic/会话id/）/ dataUrl 内嵌数据 */
+interface PendingImage {
+  name: string
+  path: string
+  dataUrl: string
+}
+
+/** 待发送文件 */
+interface PendingFile {
+  name: string
+  path: string
+  /** 是否为文本文件（发送时读取内容拼进消息） */
+  isText: boolean
+}
+
+const pendingImages = ref<PendingImage[]>([])
+const pendingFiles = ref<PendingFile[]>([])
+const attachmentInputRef = ref<HTMLInputElement>()
+/** 图片路径 → dataURL 缓存（消息气泡渲染用，异步加载后填充） */
+const imageDataUrls = reactive<Record<string, string>>({})
+
+/** 文本类扩展名（发送时读取文件内容供模型参考） */
+const TEXT_EXTS = new Set([
+  'txt',
+  'md',
+  'json',
+  'js',
+  'ts',
+  'jsx',
+  'tsx',
+  'py',
+  'java',
+  'html',
+  'css',
+  'csv',
+  'log',
+  'xml',
+  'yaml',
+  'yml',
+  'sh',
+  'bat',
+  'sql',
+  'ini',
+  'conf',
+  'vue'
+])
+
+const isTextFile = (name: string): boolean =>
+  TEXT_EXTS.has(name.split('.').pop()?.toLowerCase() ?? '')
+
+/** 保存并加入待发送附件列表（图片存 Cache/chat/pic/，文件存 Cache/chat/file/，按会话 id 分目录） */
+const addAttachmentFiles = async (files: File[]): Promise<void> => {
+  if (pendingImages.value.length + pendingFiles.value.length + files.length > 4) {
+    ElMessage.warning('每次最多发送 4 个附件')
+    return
+  }
+  if (!currentSession.value) createSession()
+  const sessionId = currentSession.value!.id
+  for (const file of files) {
+    const base64 = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () =>
+        resolve((reader.result as string).slice(String(reader.result).indexOf(',') + 1))
+      reader.onerror = () => reject(reader.error)
+      reader.readAsDataURL(file)
+    })
+    if (file.type.startsWith('image/')) {
+      const path = `${await getAppPath()}/Cache/chat/pic/${sessionId}/${Date.now()}-${file.name || '截图.png'}`
+      const ok = await window.dot.localFiles('write-base64', path, base64)
+      if (!ok) {
+        ElMessage.error(`图片保存失败：${file.name || '截图'}`)
+        continue
+      }
+      pendingImages.value.push({
+        name: file.name || '截图.png',
+        path,
+        dataUrl: `data:${file.type || 'image/png'};base64,${base64}`
+      })
+    } else {
+      const path = `${await getAppPath()}/Cache/chat/file/${sessionId}/${Date.now()}-${file.name}`
+      const ok = await window.dot.localFiles('write-base64', path, base64)
+      if (!ok) {
+        ElMessage.error(`文件保存失败：${file.name}`)
+        continue
+      }
+      pendingFiles.value.push({ name: file.name, path, isText: isTextFile(file.name) })
+    }
+  }
+}
+
+/** 选择附件（图片或文件） */
+const handleAttachmentSelect = async (e: Event): Promise<void> => {
+  const input = e.target as HTMLInputElement
+  const files = Array.from(input.files ?? [])
+  input.value = ''
+  if (files.length === 0) return
+  await addAttachmentFiles(files)
+}
+
+/** 粘贴截图：拦截剪贴板中的图片加入待发送附件（不影响纯文本粘贴） */
+const handlePaste = async (e: ClipboardEvent): Promise<void> => {
+  const files = Array.from(e.clipboardData?.files ?? [])
+  const images = files.filter((f) => f.type.startsWith('image/'))
+  if (images.length === 0) return
+  e.preventDefault()
+  await addAttachmentFiles(images)
+}
+
+/** 移除待发送附件（仅从待发送列表移除，文件保留在磁盘） */
+const removePendingImage = (img: PendingImage): void => {
+  pendingImages.value = pendingImages.value.filter((p) => p !== img)
+}
+const removePendingFile = (f: PendingFile): void => {
+  pendingFiles.value = pendingFiles.value.filter((p) => p !== f)
+}
+
+/** 按扩展名推断图片 MIME（磁盘读取时 dataURL 前缀用） */
+const mimeFromPath = (path: string): string => {
+  const p = path.toLowerCase()
+  if (p.endsWith('.jpg') || p.endsWith('.jpeg')) return 'image/jpeg'
+  if (p.endsWith('.gif')) return 'image/gif'
+  if (p.endsWith('.webp')) return 'image/webp'
+  if (p.endsWith('.bmp')) return 'image/bmp'
+  if (p.endsWith('.svg')) return 'image/svg+xml'
+  return 'image/png'
+}
+
+/** 消息气泡图片展示：优先取缓存 dataURL，否则异步读取（read-base64） */
+const imageSrc = (path: string): string => {
+  const cached = imageDataUrls[path]
+  if (cached) return cached
+  void window.dot.localFiles('read-base64', path).then((b64) => {
+    if (typeof b64 === 'string' && b64) {
+      imageDataUrls[path] = `data:${mimeFromPath(path)};base64,${b64}`
+    }
+  })
+  return ''
+}
+
 /* ================================ 工具函数 ================================ */
 
 /** 等待 DOM 更新后滚动到消息底部 */
@@ -68,6 +238,27 @@ const scrollToBottom = async (): Promise<void> => {
   }
 }
 
+/** 用户是否处于消息底部附近（80px 阈值内）：流式期间仅贴底时自动跟随 */
+const isNearBottom = (): boolean => {
+  const el = messagesContainer.value
+  if (!el) return true
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 80
+}
+
+// 流式过程中内容实时增长时自动贴底滚动（用户向上滚动阅读时暂停跟随）
+watch(
+  () => currentSession.value?.messages.find((m) => m.id === currentStreamingId.value)?.content,
+  async () => {
+    if (!isLoading.value || !isNearBottom()) return
+    await nextTick()
+    // markdown 渲染为异步，再等一帧确保高度增长完成后滚动
+    await nextTick()
+    if (messagesContainer.value && isNearBottom()) {
+      messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight
+    }
+  }
+)
+
 /** 聚焦输入框：需等待 textarea 解除禁用（isLoading 复位）后 */
 const focusInput = (): void => {
   nextTick(() => inputTextarea.value?.focus())
@@ -75,13 +266,33 @@ const focusInput = (): void => {
 
 /* ================================ 发送与停止 ================================ */
 
-/** 发送消息：调用「智能对话」中启用的接口，流式渲染回复 */
+/** 发送消息：调用「智能对话」中启用的接口，流式渲染回复（支持图片识别，仅 local 模式） */
 const sendMessage = async (): Promise<void> => {
   const userInput = inputMessage.value.trim()
-  if (!userInput || isLoading.value) return
+  const pendingImg = [...pendingImages.value]
+  const pendingFile = [...pendingFiles.value]
+  if ((!userInput && pendingImg.length === 0 && pendingFile.length === 0) || isLoading.value) return
 
   // 确保有会话
   if (!currentSession.value) createSession()
+
+  // 图片仅 local 模式支持多模态识别，其他模式提示后忽略
+  const endpointMode = settings.value.chatEndpoints.find((e) => e.enabled)?.mode
+  const sendImages = endpointMode === 'local' ? pendingImg.map((p) => p.dataUrl) : undefined
+  if (pendingImg.length > 0 && endpointMode !== 'local') {
+    ElMessage.warning('当前对话接口模式不支持图片识别，已忽略图片')
+  }
+
+  // 文本类文件读取内容拼进消息；二进制文件仅提示文件名
+  let fileNote = ''
+  for (const f of pendingFile) {
+    if (f.isText) {
+      const content = (await window.dot.localFiles('read', f.path)) as string | null
+      fileNote += `\n\n[附件文件：${f.name}]\n\`\`\`\n${(content ?? '').slice(0, 20000)}\n\`\`\``
+    } else {
+      fileNote += `\n\n[附件文件：${f.name}（二进制文件，已保存至 ${f.path}）]`
+    }
+  }
 
   // 本地模式历史对话：取本次用户消息之前的会话消息（按时间正序）
   const history = (currentSession.value?.messages ?? [])
@@ -92,8 +303,10 @@ const sendMessage = async (): Promise<void> => {
   addMessage({
     id: Date.now(),
     role: 'user',
-    content: userInput,
-    timestamp: new Date()
+    content: userInput || (pendingImg.length > 0 ? '[图片]' : '[文件]'),
+    timestamp: new Date(),
+    images: sendImages ? pendingImg.map((p) => p.path) : undefined,
+    files: pendingFile.length > 0 ? pendingFile.map((f) => f.path) : undefined
   })
   const placeholderId = Date.now() + 1
   currentStreamingId.value = placeholderId
@@ -106,26 +319,58 @@ const sendMessage = async (): Promise<void> => {
   })
 
   inputMessage.value = ''
+  pendingImages.value = []
+  pendingFiles.value = []
   isLoading.value = true
   const controller = new AbortController()
   currentController = controller
   scrollToBottom()
 
-  // 流式累积：每次增量追加到占位消息，实现实时渲染
+  // 流式累积：思考帧包成 <think> 块（AssistantMessage 解析渲染），正文帧直接追加
   let acc = ''
+  let thinkOpen = false
+  /** 是否收到过统一格式帧（local 模式）：决定最终回填使用 acc 还是 result.reply */
+  let usedChunk = false
   try {
-    const result = await chat(userInput, {
+    const result = await chat(userInput + fileNote, {
       history,
+      images: sendImages,
+      think: deepThink.value,
       signal: controller.signal,
       onDelta: (delta) => {
+        // 正文帧到达时闭合思考块（思考帧在前、正文帧在后）
+        if (thinkOpen) {
+          acc += '</think>\n'
+          thinkOpen = false
+        }
         acc += delta
+        updateMessage(currentSession.value!.id, placeholderId, { content: acc })
+      },
+      onChunk: (chunk) => {
+        // 思考帧：包成 think 块；正文帧已由 onDelta 处理，这里跳过避免重复
+        if (!chunk.reasoning_content) return
+        usedChunk = true
+        if (!thinkOpen) {
+          acc += '<think>'
+          thinkOpen = true
+        }
+        acc += chunk.reasoning_content
         updateMessage(currentSession.value!.id, placeholderId, { content: acc })
       }
     })
-    updateMessage(currentSession.value!.id, placeholderId, {
-      content: result.reply,
-      isStreaming: false
-    })
+    if (usedChunk) {
+      // local 模式：acc 已含思考块 + 正文（onDelta 追加），流结束闭合思考块
+      if (thinkOpen) acc += '</think>\n'
+      updateMessage(currentSession.value!.id, placeholderId, {
+        content: acc,
+        isStreaming: false
+      })
+    } else {
+      updateMessage(currentSession.value!.id, placeholderId, {
+        content: result.reply,
+        isStreaming: false
+      })
+    }
     // 保存服务端返回的对话会话 id，供当前对话历史的后续消息使用
     if (result.sessionId && currentSession.value?.sessionId !== result.sessionId) {
       setSessionChatId(currentSession.value!.id, result.sessionId)
@@ -158,9 +403,10 @@ const stopGenerating = (): void => {
   currentController = null
   isLoading.value = false
   if (currentSession.value && currentStreamingId.value) {
+    const msg = currentSession.value.messages.find((m) => m.id === currentStreamingId.value)
     updateMessage(currentSession.value.id, currentStreamingId.value, {
       isStreaming: false,
-      content: '（已停止生成）'
+      content: (msg?.content || '') + '\n（已停止生成）'
     })
   }
   currentStreamingId.value = null
@@ -256,37 +502,6 @@ onMounted(() => {
       <div class="sidebar-header">
         <!-- 点击品牌区（圆点 AI 与图标）返回首页 -->
         <button v-show="!sidebarCollapsed" class="brand" title="返回首页" @click="goHome">
-          <span class="brand-logo">
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              xmlns="http://www.w3.org/2000/svg"
-              width="20"
-              height="20"
-            >
-              <path
-                d="M12 2L2 7L12 12L22 7L12 2Z"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              />
-              <path
-                d="M2 17L12 22L22 17"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              />
-              <path
-                d="M2 12L12 17L22 12"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              />
-            </svg>
-          </span>
           <span class="brand-name">圆点 AI</span>
         </button>
         <button
@@ -391,10 +606,29 @@ onMounted(() => {
             <!-- 用户消息 -->
             <template v-if="msg.role === 'user'">
               <div class="user-message">
-                <div class="message-bubble">
-                  <div class="message-text">{{ msg.content }}</div>
+                <!-- 我的头像：Element Avatar 图标（蓝色）；row-reverse 下首个子元素渲染在最右侧 -->
+                <div class="message-avatar user-avatar">
+                  <el-icon :size="32" color="#1296db"><Avatar /></el-icon>
                 </div>
-                <div class="message-avatar user-avatar">U</div>
+                <div class="message-bubble">
+                  <!-- 随消息发送的图片（Cache/chat/pic/会话id/） -->
+                  <div v-if="msg.images && msg.images.length > 0" class="msg-images">
+                    <img
+                      v-for="p in msg.images"
+                      :key="p"
+                      class="msg-image"
+                      :src="imageSrc(p)"
+                      alt="图片"
+                    />
+                  </div>
+                  <div class="message-text">{{ msg.content }}</div>
+                  <!-- 随消息发送的文件（Cache/chat/file/会话id/） -->
+                  <div v-if="msg.files && msg.files.length > 0" class="msg-files">
+                    <span v-for="p in msg.files" :key="p" class="msg-file" :title="p">
+                      📄 {{ p.split('/').pop()?.replace(/^\d+-/, '') }}
+                    </span>
+                  </div>
+                </div>
               </div>
               <div class="message-time user-time">
                 {{
@@ -409,6 +643,7 @@ onMounted(() => {
                 :content="msg.content"
                 :timestamp="msg.timestamp"
                 :is-streaming="msg.isStreaming"
+                :show-thinking="deepThink"
               />
             </template>
           </div>
@@ -417,6 +652,21 @@ onMounted(() => {
 
       <!-- 输入区域 -->
       <div class="input-area">
+        <!-- 待发送附件预览（图片缩略图 + 文件名标签） -->
+        <div v-if="pendingImages.length > 0 || pendingFiles.length > 0" class="pending-attachments">
+          <div v-for="img in pendingImages" :key="img.path" class="pending-image-item">
+            <img class="pending-image" :src="img.dataUrl" :alt="img.name" />
+            <button class="pending-image-remove" title="移除" @click="removePendingImage(img)">
+              <el-icon><Delete /></el-icon>
+            </button>
+          </div>
+          <div v-for="f in pendingFiles" :key="f.path" class="pending-file-item">
+            <span class="pending-file-name" :title="f.path">{{ f.name }}</span>
+            <button class="pending-image-remove" title="移除" @click="removePendingFile(f)">
+              <el-icon><Delete /></el-icon>
+            </button>
+          </div>
+        </div>
         <div class="input-container">
           <textarea
             ref="inputTextarea"
@@ -424,21 +674,76 @@ onMounted(() => {
             class="input-textarea"
             placeholder="输入消息... (Enter 发送, Shift+Enter 换行)"
             :disabled="isLoading"
-            rows="1"
+            rows="2"
             @keydown.enter.exact.prevent="sendMessage"
             @input="handleInput"
+            @paste="handlePaste"
           ></textarea>
-          <!-- 发送按钮：空闲时为发送图标，生成中变为停止按钮 -->
-          <button
-            class="send-btn"
-            :class="{ stop: isLoading }"
-            :disabled="!isLoading && !inputMessage.trim()"
-            :title="isLoading ? '停止生成' : '发送'"
-            @click="isLoading ? stopGenerating() : sendMessage()"
-          >
-            <span v-if="isLoading" class="stop-square"></span>
-            <el-icon v-else><Promotion /></el-icon>
-          </button>
+        </div>
+        <!-- 输入框下方功能区：左侧智能体选择，右侧附件 / 深度思考 / 发送 -->
+        <div class="input-toolbar">
+          <el-dropdown class="agent-select" trigger="click" @command="selectAgent">
+            <button class="agent-btn" :disabled="isLoading" title="选择智能体">
+              <span class="agent-dot"></span>
+              <span class="agent-name">{{ agentName }}</span>
+              <span class="agent-caret">▾</span>
+            </button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="chat" :class="{ active: selectedAgentId === 'chat' }">
+                  对话
+                </el-dropdown-item>
+                <el-dropdown-item
+                  v-for="ep in settings.chatEndpoints"
+                  :key="ep.id"
+                  :command="ep.id"
+                  :class="{ active: selectedAgentId === ep.id }"
+                >
+                  {{ ep.name }}
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+
+          <div class="toolbar-right">
+            <!-- 隐藏的附件选择输入：不限制类型，图片与文件均支持 -->
+            <input
+              ref="attachmentInputRef"
+              type="file"
+              multiple
+              style="display: none"
+              @change="handleAttachmentSelect"
+            />
+            <button
+              class="tool-btn"
+              :disabled="isLoading"
+              title="附件（图片 / 文件）"
+              @click="attachmentInputRef?.click()"
+            >
+              <img class="tool-icon" :src="fujianSvg" alt="附件" />
+            </button>
+            <button
+              class="tool-btn"
+              :class="{ active: deepThink }"
+              :disabled="isLoading"
+              :title="deepThink ? '深度思考：已开启' : '深度思考：已关闭'"
+              @click="deepThink = !deepThink"
+            >
+              <img class="tool-icon" :src="deepThink ? sikaoSvg : sikaoHuiSvg" alt="深度思考" />
+            </button>
+            <span class="toolbar-divider"></span>
+            <!-- 发送按钮：空闲时为发送图标，生成中变为停止按钮 -->
+            <button
+              class="send-btn"
+              :class="{ stop: isLoading }"
+              :disabled="isLoading"
+              :title="isLoading ? '停止生成' : '发送'"
+              @click="isLoading ? stopGenerating() : sendMessage()"
+            >
+              <span v-if="isLoading" class="stop-square"></span>
+              <el-icon v-else><Promotion /></el-icon>
+            </button>
+          </div>
         </div>
         <p class="input-hint">AI 助手可能产生错误信息，请核实重要内容</p>
       </div>
@@ -821,9 +1126,10 @@ onMounted(() => {
 }
 
 .messages-list {
-  max-width: 800px;
+  /* 宽屏自适应：上限 1080px，窄屏时左右留 24px 边距，避免大屏留白过多 */
+  max-width: min(1280px, calc(100% - 48px));
   margin: 0 auto;
-  padding: 0 32px;
+  padding: 0 8px;
   display: flex;
   flex-direction: column;
   gap: 24px;
@@ -848,8 +1154,8 @@ onMounted(() => {
 }
 
 .message-avatar {
-  width: 34px;
-  height: 34px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
   display: flex;
   align-items: center;
@@ -857,11 +1163,14 @@ onMounted(() => {
   flex-shrink: 0;
   font-size: 13px;
   font-weight: 600;
+  align-self: flex-start;
+  background: transparent;
 }
 
 .user-avatar {
-  background: var(--color-primary);
-  color: white;
+  background: transparent;
+  border: none;
+  color: #1296db;
 }
 
 .message-bubble {
@@ -900,11 +1209,143 @@ onMounted(() => {
   background: transparent;
 }
 
+/* 待发送附件预览条（图片缩略图 + 文件标签） */
+.pending-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  max-width: min(1280px, calc(100% - 48px));
+  margin: 0 auto 8px;
+}
+
+.pending-image-item {
+  position: relative;
+  width: 72px;
+  height: 72px;
+  border-radius: 8px;
+  /* 不裁剪溢出：右上角删除按钮悬浮在容器外 */
+  border: 1px solid var(--color-border);
+}
+
+.pending-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  border-radius: 8px;
+}
+
+/* 待发送文件标签 */
+.pending-file-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 26px 0 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  background: var(--color-card);
+  max-width: 220px;
+}
+
+.pending-file-name {
+  font-size: 12px;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pending-image-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  font-size: 11px;
+}
+
+.pending-image-remove:hover {
+  background: rgba(0, 0, 0, 0.75);
+}
+
+/* 图片选择按钮 */
+.image-btn {
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 18px;
+  transition: all 0.15s;
+}
+
+.image-btn:hover:not(:disabled) {
+  color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+}
+
+.image-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 用户消息气泡内图片 */
+.msg-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.msg-image {
+  max-width: 220px;
+  max-height: 160px;
+  border-radius: 8px;
+  object-fit: cover;
+  display: block;
+  cursor: zoom-in;
+}
+
+/* 用户消息气泡内文件标签 */
+.msg-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.msg-file {
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.25);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .input-container {
   display: flex;
   gap: 8px;
   align-items: flex-end;
-  max-width: 800px;
+  max-width: min(1280px, calc(100% - 48px));
   margin: 0 auto;
   background: var(--color-card);
   border: 1px solid var(--color-border);
@@ -925,6 +1366,8 @@ onMounted(() => {
   background: transparent;
   outline: none;
   resize: none;
+  /* 默认展示 2 行（rows=2，随内容自动增高，上限 200px） */
+  min-height: 44px;
   padding: 8px 0;
   font-size: 14.5px;
   line-height: 1.5;
@@ -935,6 +1378,109 @@ onMounted(() => {
 
 .input-textarea::placeholder {
   color: var(--color-text-secondary);
+}
+
+/* ===== 输入框下方功能区 ===== */
+.input-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  max-width: min(1280px, calc(100% - 48px));
+  margin: 8px auto 0;
+  padding: 0 4px;
+}
+
+/* 左侧：智能体选择 */
+.agent-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  background: var(--color-card);
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--color-text);
+  transition: all 0.15s;
+}
+
+.agent-btn:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.agent-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.agent-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-primary);
+}
+
+.agent-name {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-caret {
+  font-size: 10px;
+  color: var(--color-text-secondary);
+}
+
+/* 右侧：附件 / 深度思考 / 分割线 / 发送 */
+.toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* 附件与思考：尺寸为发送按钮（36px）的一半 */
+.tool-btn {
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.tool-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+}
+
+.tool-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 深度思考开启态：淡色底突出 */
+.tool-btn.active {
+  background: color-mix(in srgb, var(--color-primary) 14%, transparent);
+}
+
+.tool-icon {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+
+/* 附件/思考组与发送按钮之间的分割线 */
+.toolbar-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--color-border);
+  margin: 0 4px;
 }
 
 .send-btn {

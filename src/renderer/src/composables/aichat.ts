@@ -16,19 +16,11 @@ import type { Ref } from 'vue'
 import type { ChatEndpoint, LlmConfig } from '../types/settings'
 import {
   summarizeErrorBody,
-  parseLlmResponse,
-  getLlmApiFormat,
-  normalizeLlmBase,
+  sendLlmStream,
   type LlmChatMessage,
-  type LlmMessage,
-  type StreamPayload
+  type LlmStreamChunk
 } from '../utils/aiRequest'
-import {
-  parseMcpEntries,
-  listMcpTools,
-  callMcpTool,
-  type McpEntry
-} from '../utils/mcpClient'
+import { parseMcpEntries, listMcpTools, callMcpTool, type McpEntry } from '../utils/mcpClient'
 
 /** 内置工具列表（供本地模式智能体收集工具定义） */
 const { tools: aiLocalTools } = useAiLocalTools()
@@ -41,12 +33,16 @@ export interface ChatOptions {
   think?: boolean
   /** 历史对话（local 模式使用，按时间正序，不含本次用户消息） */
   history?: { role: 'user' | 'assistant'; content: string }[]
+  /** 随消息发送的图片（dataURL 数组，仅 local 模式支持多模态识别） */
+  images?: string[]
   /**
    * 流式增量回调：
    * - ws / local 模式：每收到一帧增量回调一次（真实流式）
    * - http 模式：主进程为聚合响应，收到完整回复后回调一次
    */
   onDelta?: (delta: string) => void
+  /** 统一格式流式帧回调：{ content, reasoning_content, finish, token, toolcalls }（仅 local 模式触发） */
+  onChunk?: (chunk: LlmStreamChunk) => void
   /** 取消信号：中止后停止接收（ws 模式会真实断开连接）并抛出 AbortError */
   signal?: AbortSignal
 }
@@ -180,8 +176,8 @@ export const ensureEndpointLogin = async (): Promise<void> => {
  * @throws 未启用接口、请求失败或被中止（AbortError）时抛出异常
  */
 export const chat = async (message: string, options: ChatOptions = {}): Promise<ChatResult> => {
-  const { think = false, onDelta, signal } = options
-  if (!message.trim()) throw new Error('消息内容不能为空')
+  const { think = false, images, onDelta, onChunk, signal } = options
+  if (!message.trim() && !(images && images.length > 0)) throw new Error('消息内容不能为空')
   if (signal?.aborted) throw abortError()
 
   const endpoint = getActiveEndpoint()
@@ -191,9 +187,9 @@ export const chat = async (message: string, options: ChatOptions = {}): Promise<
     return chatViaStomp(endpoint, message, { onDelta, signal })
   }
 
-  // 本地模式：转发给关联的大模型配置（SSE 真实流式）
+  // 本地模式：转发给关联的大模型配置（统一格式流式，支持图片多模态识别）
   if (endpoint.mode === 'local') {
-    return chatViaLocalLlm(endpoint, message, { think, onDelta, signal })
+    return chatViaLocalLlm(endpoint, message, { think, images, onDelta, onChunk, signal })
   }
 
   // HTTP 模式：复用会话缓存（无缓存时先登录），请求以 Cookie 携带登录会话
@@ -267,11 +263,13 @@ function chatViaLocalLlm(
   options: {
     think?: boolean
     history?: { role: 'user' | 'assistant'; content: string }[]
+    images?: string[]
     onDelta?: (delta: string) => void
+    onChunk?: (chunk: LlmStreamChunk) => void
     signal?: AbortSignal
   }
 ): Promise<ChatResult> {
-  const { think = false, history = [], onDelta, signal } = options
+  const { think = false, history = [], images, onDelta, onChunk, signal } = options
   const { settings } = useSettings()
   const llm = settings.value.llmConfigs.find((c) => c.id === endpoint.localModelId)
   if (!llm) {
@@ -282,18 +280,28 @@ function chatViaLocalLlm(
   }
 
   // 收集工具（内置 + MCP），有工具则走提示词驱动的智能体循环（任意协议格式均可），
-  // 无工具时保持 SSE 真实流式
+  // 无工具时保持统一格式流式
   return collectLocalTools(settings)
     .then((tools) => {
       if (signal?.aborted) throw abortError()
       if (tools.length > 0) {
-        return chatViaLocalAgent(endpoint, llm, message, { history, tools, onDelta, signal })
+        return chatViaLocalAgent(endpoint, llm, message, {
+          history,
+          tools,
+          images,
+          think,
+          onDelta,
+          onChunk,
+          signal
+        })
       }
       return chatViaLocalStream(endpoint, llm, message, {
         system: buildLocalSystemPrompt(settings),
         history,
         think,
+        images,
         onDelta,
+        onChunk,
         signal
       })
     })
@@ -339,7 +347,10 @@ function buildLocalSystemPrompt(
   // 工具清单与调用协议
   if (tools.length > 0) {
     const toolList = tools
-      .map((t) => `- ${t.name}：${t.description}${t.paramsText ? `。参数：${t.paramsText}` : '。参数：无'}`)
+      .map(
+        (t) =>
+          `- ${t.name}：${t.description}${t.paramsText ? `。参数：${t.paramsText}` : '。参数：无'}`
+      )
       .join('\n')
     parts.push(
       '# 可用工具\n' +
@@ -373,13 +384,17 @@ function schemaParamsText(schema: Record<string, unknown>): string {
 }
 
 /** 收集可用工具：内置工具 + 智能配置中 url 类型 MCP 服务的工具（同名时 MCP 加服务名前缀） */
-async function collectLocalTools(settings: ReturnType<typeof useSettings>['settings']): Promise<LocalAgentTool[]> {
+async function collectLocalTools(
+  settings: ReturnType<typeof useSettings>['settings']
+): Promise<LocalAgentTool[]> {
   const tools: LocalAgentTool[] = []
 
   // 内置工具：params 拼接为参数说明文本
   for (const t of aiLocalTools) {
     const paramsText = t.params
-      .map((p) => (p.required ? `${p.name}（必填，${p.description}）` : `${p.name}（选填，${p.description}）`))
+      .map((p) =>
+        p.required ? `${p.name}（必填，${p.description}）` : `${p.name}（选填，${p.description}）`
+      )
       .join('、')
     tools.push({
       name: t.id,
@@ -441,77 +456,31 @@ function parseToolCalls(content: string): { name: string; args: Record<string, u
   return calls
 }
 
-/** 为智能体循环构建流式请求（按协议格式分发，消息列表含 system/assistant/user 文本消息） */
-function buildAgentRequest(
-  llm: LlmConfig,
-  messages: LlmChatMessage[]
-): { url: string; headers: Record<string, string>; body: Record<string, unknown> } {
-  const base = normalizeLlmBase(llm.baseUrl)
-  const format = getLlmApiFormat(llm)
-  const system = messages.find((m) => m.role === 'system')?.content ?? ''
-  const rest = messages
-    .filter((m) => m.role !== 'system')
-    .map((m) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }))
-
-  if (format === 'messages') {
-    return {
-      url: `${base}/v1/messages`,
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': llm.apiKey,
-        'anthropic-version': '2023-06-01'
-      },
-      body: {
-        model: llm.model,
-        temperature: 0.7,
-        max_tokens: 4096,
-        stream: true,
-        ...(system ? { system } : {}),
-        messages: rest
-      }
-    }
-  }
-  if (format === 'responses') {
-    return {
-      url: `${base}/v1/responses`,
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${llm.apiKey}` },
-      body: {
-        model: llm.model,
-        temperature: 0.7,
-        stream: true,
-        ...(system ? { instructions: system } : {}),
-        input: rest
-      }
-    }
-  }
-  return {
-    url: `${base}/v1/chat/completions`,
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${llm.apiKey}` },
-    body: { model: llm.model, temperature: 0.7, stream: true, messages: rest }
-  }
-}
-
 /**
- * 智能体循环：每轮均为 SSE 流式请求。
+ * 智能体循环：每轮均经 sendLlmStream 统一格式流式请求。
  * 工具调用轮的输出（<tool_call> 调用语句）被抑制不展示；最终回答轮实时逐字流式渲染。
  */
 async function chatViaLocalAgent(
   endpoint: ChatEndpoint,
-  llm: LlmConfig,
+  _llm: LlmConfig,
   message: string,
   options: {
     history: { role: 'user' | 'assistant'; content: string }[]
     tools: LocalAgentTool[]
+    images?: string[]
+    /** 深度思考开关（随请求透传给大模型） */
+    think?: boolean
     onDelta?: (delta: string) => void
+    onChunk?: (chunk: LlmStreamChunk) => void
     signal?: AbortSignal
   }
 ): Promise<ChatResult> {
-  const { history, tools, onDelta, signal } = options
+  const { history, tools, images, think = false, onDelta, onChunk, signal } = options
 
   const messages: LlmChatMessage[] = [
     { role: 'system', content: buildLocalSystemPrompt(useSettings().settings, tools) },
     ...history.map((h) => ({ role: h.role, content: h.content }) as LlmChatMessage),
-    { role: 'user', content: message }
+    { role: 'user', content: buildUserContent(message, images) }
   ]
 
   const byName = new Map(tools.map((t) => [t.name, t]))
@@ -519,28 +488,46 @@ async function chatViaLocalAgent(
   for (let round = 0; round < AGENT_MAX_ROUNDS; round++) {
     if (signal?.aborted) throw abortError()
 
-    // 流式接收本轮输出：默认抑制展示，确认不是 <tool_call> 调用轮后才实时放行
+    // 流式接收本轮输出：思考帧即时流式转发（实时逐字展示，不聚合）；
+    // 正文帧确认不是 <tool_call> 调用轮后才实时放行
     let pending = ''
     let live = false
-    const roundDelta = (delta: string): void => {
-      pending += delta
-      if (live) {
-        onDelta?.(delta)
-        return
-      }
-      const t = pending.trimStart()
-      if (!t) return
-      // 仍可能是 "<tool_call" 的不完整前缀时继续等待；确认是其他文本则开始实时展示
-      if ('<tool_call'.startsWith(t) || t.startsWith('<tool_call')) return
-      live = true
-      onDelta?.(pending)
+    let roundText = ''
+
+    /** 放行正文帧（此时已确定非工具调用轮）：onDelta + 统一格式 onChunk 同步外发 */
+    const emitContent = (delta: string): void => {
+      onDelta?.(delta)
+      onChunk?.({ content: delta, reasoning_content: '', finish: '', token: null, toolcalls: [] })
     }
 
-    const full = await localLlmSse(llm, buildAgentRequest(llm, messages), {
-      endpointName: endpoint.name,
-      onDelta: roundDelta,
-      signal
+    // 经统一格式流式接口接收本轮输出
+    const result = await sendLlmStream(messages, {
+      think,
+      signal,
+      onChunk: (chunk) => {
+        // 思考帧：即时转发流式展示（含工具调用轮的思考，保持真实思考链）
+        if (chunk.reasoning_content) {
+          onChunk?.(chunk)
+          return
+        }
+        if (!chunk.content) return
+        roundText += chunk.content
+        if (live) {
+          emitContent(chunk.content)
+          return
+        }
+        pending += chunk.content
+        const t = pending.trimStart()
+        if (!t) return
+        // 仍可能是 "<tool_call" 的不完整前缀时继续等待；确认是其他文本则开始实时展示
+        if ('<tool_call'.startsWith(t) || t.startsWith('<tool_call')) return
+        live = true
+        onDelta?.(pending)
+        emitContent(chunk.content)
+        pending = ''
+      }
     })
+    const full = roundText || result.content
     const calls = parseToolCalls(full)
 
     if (calls.length === 0) {
@@ -578,210 +565,56 @@ async function chatViaLocalAgent(
   throw new Error(`对话接口「${endpoint.name}」工具调用轮次已达上限（${AGENT_MAX_ROUNDS}）`)
 }
 
-/* ---------------- 本地模式：SSE 真实流式（无工具时） ---------------- */
+/* ---------------- 本地模式：统一格式流式（无工具时） ---------------- */
 
-/** 本地模式 SSE 请求自增序列（配合时间戳生成渲染进程侧唯一 requestId） */
-let localSseSeq = 0
-
-/**
- * 本地模式 SSE 流式请求（底层管道）：发起 POST 流式请求，逐帧解析文本增量并回调，
- * 返回完整文本。供无工具流式对话与智能体循环复用。
- */
-function localLlmSse(
-  llm: LlmConfig,
-  request: { url: string; headers: Record<string, string>; body: Record<string, unknown> },
-  options: { endpointName: string; onDelta?: (delta: string) => void; signal?: AbortSignal }
-): Promise<string> {
-  const { endpointName, onDelta, signal } = options
-
-  return new Promise<string>((resolve, reject) => {
-    let settled = false
-    let full = ''
-    let buffer = ''
-    const requestId = `llm-${Date.now()}-${++localSseSeq}`
-
-    const succeed = (): void => {
-      if (settled) return
-      settled = true
-      cleanup()
-      resolve(full.trim())
-    }
-    const fail = (error: unknown): void => {
-      if (settled) return
-      settled = true
-      cleanup()
-      reject(error)
-    }
-
-    /** 收敛状态：移除 chunk 订阅与中止监听（保证只执行一次） */
-    const cleanup = (): void => {
-      signal?.removeEventListener('abort', onAbort)
-      unsubscribeChunks()
-    }
-
-    /** signal 中止：停止接收并丢弃结果 */
-    const onAbort = (): void => fail(abortError())
-    signal?.addEventListener('abort', onAbort, { once: true })
-    if (signal?.aborted) {
-      fail(abortError())
-      return
-    }
-
-    /** 消费一行 SSE 文本：按协议格式提取文本增量并回调 */
-    const format = getLlmApiFormat(llm)
-    const consumeSseLine = (line: string): void => {
-      const trimmed = line.trim()
-      if (!trimmed.startsWith('data:')) return
-      const data = trimmed.slice(5).trim()
-      if (!data || data === '[DONE]') return
-      try {
-        let delta = ''
-        if (format === 'messages') {
-          // Anthropic 事件流：content_block_delta（text_delta）
-          const payload = JSON.parse(data) as {
-            type?: string
-            delta?: { type?: string; text?: string }
-          }
-          if (payload.type === 'content_block_delta' && payload.delta?.type === 'text_delta') {
-            delta = payload.delta.text ?? ''
-          }
-        } else if (format === 'responses') {
-          // OpenAI Responses 事件流：output_text.delta
-          const payload = JSON.parse(data) as { type?: string; delta?: string }
-          if (payload.type === 'response.output_text.delta') delta = payload.delta ?? ''
-        } else {
-          // OpenAI 兼容事件流：choices[0].delta.content
-          const delta2 = (JSON.parse(data) as StreamPayload).choices?.[0]?.delta
-          delta = delta2?.content ?? ''
-        }
-        if (delta) {
-          full += delta
-          onDelta?.(delta)
-        }
-      } catch {
-        /* 跳过无法解析的行 */
-      }
-    }
-
-    // 先订阅 chunk 事件再发起请求，保证首帧不丢失
-    const unsubscribeChunks = window.dot.toolbox.net.onHttpChunk((payload) => {
-      if (payload.requestId !== requestId || settled) return
-      buffer += payload.chunk
-      // 末行可能不完整（无换行符），留待下一帧拼接
-      const lines = buffer.split('\n')
-      buffer = lines.pop() ?? ''
-      for (const line of lines) consumeSseLine(line)
-    })
-
-    window.dot.toolbox.net
-      .httpRequest({
-        requestId,
-        method: 'POST',
-        url: request.url,
-        headers: request.headers,
-        body: JSON.stringify(request.body),
-        bodyType: 'json'
-      })
-      .then((result) => {
-        if (settled) return
-        if (result.status !== 200) {
-          fail(
-            new Error(
-              `对话接口「${endpointName}」请求失败（HTTP ${result.status}）${summarizeErrorBody(result.body)}`
-            )
-          )
-          return
-        }
-        if (result.isSse) {
-          // 处理缓冲区中末尾未换行的最后一行
-          consumeSseLine(buffer)
-        } else {
-          // 服务端未按 SSE 返回（不支持流式）：body 为聚合 JSON，按协议格式非流式解析
-          const content = parseLlmResponse(format, result.body, false).content
-          if (content) {
-            full = content
-            onDelta?.(content)
-          }
-        }
-        if (!full.trim()) {
-          fail(new Error(`对话接口「${endpointName}」未返回有效回复`))
-          return
-        }
-        succeed()
-      })
-      .catch((error) => fail(error instanceof Error ? error : new Error(String(error))))
-  })
+/** 构建用户消息内容：无图片时为纯文本；有图片时为多模态片段数组（文本 + image_url dataURL） */
+function buildUserContent(message: string, images?: string[]): string | LlmChatMessage['content'] {
+  if (!images || images.length === 0) return message
+  return [
+    { type: 'text', text: message || '请识别图片内容' },
+    ...images.map((url) => ({ type: 'image_url' as const, image_url: { url } }))
+  ]
 }
 
-/** 无工具时的本地模式流式对话：携带系统提示词与历史，SSE 真实流式 */
+/** 无工具时的本地模式流式对话：经统一格式流式接口，携带系统提示词与历史（支持图片识别） */
 async function chatViaLocalStream(
   endpoint: ChatEndpoint,
-  llm: LlmConfig,
+  _llm: LlmConfig,
   message: string,
   options: {
     system: string
     history: { role: 'user' | 'assistant'; content: string }[]
     think: boolean
+    images?: string[]
     onDelta?: (delta: string) => void
+    onChunk?: (chunk: LlmStreamChunk) => void
     signal?: AbortSignal
   }
 ): Promise<ChatResult> {
-  const { system, history, think = false, onDelta, signal } = options
-  const base = normalizeLlmBase(llm.baseUrl)
-  const format = getLlmApiFormat(llm)
-  const chatMessages: LlmMessage[] = [
+  const { system, history, think = false, images, onDelta, onChunk, signal } = options
+  const chatMessages: LlmChatMessage[] = [
     { role: 'system', content: system },
     ...history.map((h) => ({ role: h.role, content: h.content })),
-    { role: 'user', content: message }
+    { role: 'user', content: buildUserContent(message, images) }
   ]
 
-  // 按协议格式分发请求地址、头与请求体（SSE 流式）
-  let url: string
-  let headers: Record<string, string>
-  let body: Record<string, unknown>
-  if (format === 'messages') {
-    url = `${base}/v1/messages`
-    headers = {
-      'Content-Type': 'application/json',
-      'x-api-key': llm.apiKey,
-      'anthropic-version': '2023-06-01'
+  let reply = ''
+  const result = await sendLlmStream(chatMessages, {
+    think,
+    signal,
+    onChunk: (chunk) => {
+      // 正文帧：累积并回调（思考帧仅经 onChunk 透传给调用方自行处理）
+      if (chunk.content) {
+        reply += chunk.content
+        onDelta?.(chunk.content)
+      }
+      onChunk?.(chunk)
     }
-    body = {
-      model: llm.model,
-      temperature: 0.7,
-      max_tokens: 4096,
-      stream: true,
-      system,
-      messages: chatMessages.filter((m) => m.role !== 'system')
-    }
-  } else if (format === 'responses') {
-    url = `${base}/v1/responses`
-    headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${llm.apiKey}` }
-    body = {
-      model: llm.model,
-      temperature: 0.7,
-      stream: true,
-      instructions: system,
-      input: chatMessages.filter((m) => m.role !== 'system')
-    }
-  } else {
-    url = `${base}/v1/chat/completions`
-    headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${llm.apiKey}` }
-    body = {
-      model: llm.model,
-      temperature: 0.7,
-      messages: chatMessages,
-      stream: true,
-      ...(think ? { chat_template_kwargs: { thinking: true } } : {})
-    }
-  }
-
-  const reply = await localLlmSse(llm, { url, headers, body }, {
-    endpointName: endpoint.name,
-    onDelta,
-    signal
   })
-  return { reply, sessionId: '' }
+  // 服务端忽略 stream 参数返回普通 JSON 时，正文经聚合结果返回
+  const text = (reply || result.content).trim()
+  if (!text) throw new Error(`对话接口「${endpoint.name}」未返回有效回复`)
+  return { reply: text, sessionId: '' }
 }
 
 /* ================================ WebSocket（STOMP）流式对话 ================================ */

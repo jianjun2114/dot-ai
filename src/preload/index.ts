@@ -26,6 +26,15 @@ export interface DbColumnInfo {
   comment?: string
 }
 
+/** 索引/约束元信息 */
+export interface DbIndexInfo {
+  name: string
+  kind: 'INDEX' | 'UNIQUE' | 'FOREIGN'
+  columns: string
+  refTable?: string
+  refColumns?: string
+}
+
 /** 通用 IPC 事件监听器封装 */
 const on = (channel: string, callback: (payload: unknown) => void): (() => void) => {
   const listener = (_event: IpcRendererEvent, payload: unknown): void => callback(payload)
@@ -215,12 +224,13 @@ const toolbox = {
     disconnect: (connId: string): Promise<{ success: boolean }> =>
       ipcRenderer.invoke('tb:db-disconnect', connId),
 
-    /** 浏览目录：databases / schemas / tables / columns / sequences / procedures */
+    /** 浏览目录：databases / schemas / tables / columns / sequences / procedures / indexes */
     catalog: (
       connId: string,
-      scope: 'databases' | 'schemas' | 'tables' | 'columns' | 'sequences' | 'procedures',
+      scope:
+        'databases' | 'schemas' | 'tables' | 'columns' | 'sequences' | 'procedures' | 'indexes',
       parent?: { database?: string; schema?: string; table?: string }
-    ): Promise<Array<{ name: string; type?: string }> | DbColumnInfo[]> =>
+    ): Promise<Array<{ name: string; type?: string }> | DbColumnInfo[] | DbIndexInfo[]> =>
       ipcRenderer.invoke('tb:db-catalog', { connId, scope, parent }),
 
     /** 执行任意 SQL（查询最多返回 1000 行）；queryId 用于取消，database 切换当前库 */
@@ -324,7 +334,8 @@ const dotApi = {
       | 'exists'
       | 'mkdir'
       | 'delete'
-      | 'read-base64',
+      | 'read-base64'
+      | 'write-base64',
     ...args: unknown[]
   ): Promise<string | string[] | boolean | null> =>
     ipcRenderer.invoke('local-files', action, ...args),
