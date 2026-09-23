@@ -93,8 +93,9 @@ const addFile = async (data: Data): Promise<void> => {
   editNodeKey.value = `${data.node_key}-${(data.children?.length || 0) + 1}`
   const newNode = { label: '', node_key: editNodeKey.value, parent: data.node_key }
   if (data.node_key === 'commonFiles') {
-    // 数据绑定修改
+    // 数据绑定修改（同时同步到树的常用文档子节点，保持目录形态）
     commonFiles.value.push(newNode)
+    data.children?.push(newNode)
     nextTick(() => {
       editCommonInputRef.value?.focus()
     })
@@ -123,18 +124,30 @@ const confirmAddFile = async (data: Data): Promise<void> => {
     return
   }
 
-  const parentDir = data.parent === 'commonFiles' ? '常用文档' : data.parent
-  // 文件统一使用无扩展名
-  const filePath = `${rootPath.value}/${parentDir}/${fileName}`
-
   try {
     if (oldFileName.value) {
-      const oldPath = `${rootPath.value}/${parentDir}/${oldFileName.value}`
-      await window.dot.localFiles('rename', oldPath, filePath)
+      if (!data.parent) {
+        // 目录重命名（顶级目录节点没有 parent）
+        const oldPath = `${rootPath.value}/${oldFileName.value}`
+        const newPath = `${rootPath.value}/${fileName}`
+        await window.dot.localFiles('rename', oldPath, newPath)
+        ElMessage.success('目录重命名成功')
+        // 同步更新目录节点及子文件节点的引用，避免后续文件操作使用旧目录名
+        data.node_key = fileName
+        data.children?.forEach((c) => (c.parent = fileName))
+      } else {
+        const parentDir = data.parent === 'commonFiles' ? '常用文档' : data.parent
+        const filePath = `${rootPath.value}/${parentDir}/${fileName}`
+        const oldPath = `${rootPath.value}/${parentDir}/${oldFileName.value}`
+        await window.dot.localFiles('rename', oldPath, filePath)
+        ElMessage.success('文件重命名成功')
+      }
       oldFileName.value = ''
-      ElMessage.success('文件重命名成功')
     } else {
       // 创建文件
+      const parentDir = data.parent === 'commonFiles' ? '常用文档' : data.parent
+      // 文件统一使用无扩展名
+      const filePath = `${rootPath.value}/${parentDir}/${fileName}`
       const success = await window.dot.localFiles('create', filePath)
       if (!success) {
         ElMessage.error('文件创建失败')
@@ -150,10 +163,17 @@ const confirmAddFile = async (data: Data): Promise<void> => {
 
 // 取消编辑
 const handleEditBlur = (data: Data): void => {
+  // 有 oldFileName 表示是重命名模式，失焦走 confirmAddFile；否则是新增模式
+  if (oldFileName.value) {
+    confirmAddFile(data)
+    return
+  }
+  // 新增模式：取消输入则移除节点
   editNodeKey.value = ''
-  // 如果是新增的常用文档（node_key 包含 'commonFiles-'），从列表移除
+  // 如果是新增的常用文档（node_key 包含 'commonFiles-'），从列表和树中移除
   if (data.node_key?.includes('commonFiles-')) {
     commonFiles.value = commonFiles.value.filter((f) => f.node_key !== data.node_key)
+    treeAllRef.value?.remove(data)
     return
   }
   // 树节点的删除操作
@@ -290,8 +310,10 @@ const selectDate = async (day: number | null): Promise<void> => {
       node.expanded = true
     }
   } else {
-    // 检查最后一个节点是否为空（没有子文件）
-    const lastNode = fileTreeData.value[fileTreeData.value.length - 1]
+    // 检查最后一个非「常用文档」节点是否为空（没有子文件），空节点可复用为日期节点
+    const lastNode = [...fileTreeData.value]
+      .reverse()
+      .find((node) => node.node_key !== 'commonFiles')
     if (lastNode && lastNode.children && lastNode.children.length === 0) {
       // 更新已有空节点
       lastNode.label = dateKey
@@ -367,8 +389,13 @@ onMounted(async () => {
 // 新增常用文档 - 直接添加到 fileTreeData
 const addCommonFile = (): void => {
   if (editNodeKey.value) return
-  const commonNode = fileTreeData.value.find((node) => node.node_key === 'commonFiles')
-  if (!commonNode) return
+  let commonNode = fileTreeData.value.find((node) => node.node_key === 'commonFiles')
+  // 常用文档目录不存在时，创建目录并补充树节点
+  if (!commonNode) {
+    commonNode = { label: '常用文档', node_key: 'commonFiles', children: [] }
+    fileTreeData.value.push(commonNode)
+    window.dot.localFiles('mkdir', `${rootPath.value}/常用文档`)
+  }
   addFile(commonNode)
 }
 
@@ -562,9 +589,14 @@ watch(editorContent, () => {
                       }}</span>
                     </template>
                     <div class="node-actions">
-                      <template v-if="data.children && data.node_key !== 'commonFiles'">
+                      <!-- 常用文档目录固定，不可编辑/删除 -->
+                      <template v-if="data.node_key === 'commonFiles'"></template>
+                      <template v-else-if="data.children">
                         <el-icon class="action-icon add-icon" @click.stop="addFile(data)">
                           <Plus />
+                        </el-icon>
+                        <el-icon class="action-icon edit-icon" @click.stop="editFile(data)">
+                          <EditPen />
                         </el-icon>
                         <el-icon class="action-icon minus-icon" @click.stop="deleteDir(data)">
                           <Minus />
