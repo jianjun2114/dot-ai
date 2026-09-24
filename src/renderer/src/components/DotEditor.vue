@@ -16,7 +16,7 @@
  *           modelValue 文档内容（HTML，统一数据层格式）
  *   emit  : update:modelValue 内容变化时上报 HTML
  */
-import { ref, computed, watch, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onBeforeUnmount, nextTick } from 'vue'
 import { useEditor, EditorContent } from '@tiptap/vue-3'
 import { StarterKit } from '@tiptap/starter-kit'
 import { TextStyle, Color, FontSize, BackgroundColor } from '@tiptap/extension-text-style'
@@ -38,7 +38,10 @@ import {
   Tickets,
   Memo,
   Back,
-  Printer
+  Printer,
+  Search,
+  ArrowUp,
+  ArrowDown
 } from '@element-plus/icons-vue'
 import { useTheme, isDarkTheme } from '../composables/useTheme'
 import {
@@ -283,6 +286,11 @@ const editor = useEditor({
      */
     handleDOMEvents: {
       keydown: (_view, event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
+          event.preventDefault()
+          openFindBar()
+          return true
+        }
         if (event.ctrlKey || event.metaKey) {
           editor.value?.view.dom.classList.add('ctrl-pressed')
         }
@@ -970,6 +978,204 @@ const runAiEdit = async (): Promise<void> => {
     aiLoading.value = false
   }
 }
+
+// ============================== 查找与替换 ==============================
+
+/** 查找栏可见性 */
+const findBarVisible = ref(false)
+
+/** 查找关键词 */
+const findText = ref('')
+
+/** 替换文本 */
+const replaceTextValue = ref('')
+
+/** 当前命中序号（0 起）与命中总数 */
+const matchIndex = ref(0)
+const matchTotal = ref(0)
+
+/** 查找输入框引用（打开后聚焦） */
+const findInputRef = ref<HTMLInputElement>()
+
+/** 文本段：拼接全文用的文本节点片段（from 为该段首字符在文档中的位置） */
+interface TextSegment {
+  text: string
+  from: number
+}
+
+/**
+ * 收集文档全部文本节点（按文档顺序），用于构建全文与位置映射
+ */
+const collectSegments = (): TextSegment[] => {
+  const segs: TextSegment[] = []
+  editor.value?.state.doc.descendants((node, pos) => {
+    if (node.isText && node.text) segs.push({ text: node.text, from: pos })
+    return true
+  })
+  return segs
+}
+
+/**
+ * 计算全部命中位置（不区分大小写）：
+ * 将各文本节点按序拼接为全文（记录每个字符的文档位置），再顺序匹配关键词；
+ * 跨节点的相邻文本（如同一段落内被 mark 切分）也能命中。
+ */
+const computeMatches = (): { from: number; to: number }[] => {
+  const keyword = findText.value.trim().toLowerCase()
+  if (!keyword || !editor.value) return []
+
+  let buffer = ''
+  const offsets: number[] = []
+  for (const seg of collectSegments()) {
+    for (let i = 0; i < seg.text.length; i++) {
+      offsets.push(seg.from + i)
+      buffer += seg.text[i].toLowerCase()
+    }
+  }
+
+  const matches: { from: number; to: number }[] = []
+  let idx = buffer.indexOf(keyword)
+  while (idx !== -1) {
+    matches.push({ from: offsets[idx], to: offsets[idx + keyword.length - 1] + 1 })
+    idx = buffer.indexOf(keyword, idx + keyword.length)
+  }
+  return matches
+}
+
+/**
+ * 刷新命中统计：保留当前序号指向（越界时回绕），
+ * 若当前选区恰为某一命中，则将序号对齐到该命中。
+ */
+const refreshMatches = (): void => {
+  const matches = computeMatches()
+  matchTotal.value = matches.length
+  if (matches.length === 0) {
+    matchIndex.value = 0
+    return
+  }
+  const { from, to } = editor.value!.state.selection
+  const at = matches.findIndex((m) => m.from === from && m.to === to)
+  if (at !== -1) {
+    matchIndex.value = at
+  } else if (matchIndex.value >= matches.length) {
+    matchIndex.value = 0
+  }
+}
+
+/**
+ * 定位到指定序号的命中（选中文本并滚动到可见）
+ */
+const selectMatch = (matches: { from: number; to: number }[], index: number): void => {
+  const m = matches[index]
+  if (!m) return
+  editor.value?.chain().focus().setTextSelection({ from: m.from, to: m.to }).scrollIntoView().run()
+  matchIndex.value = index
+}
+
+/**
+ * 查找下一个/上一个命中（循环）
+ * @param direction 1 下一个 / -1 上一个
+ */
+const findMatch = (direction: 1 | -1): void => {
+  const matches = computeMatches()
+  matchTotal.value = matches.length
+  if (matches.length === 0) {
+    matchIndex.value = 0
+    return
+  }
+  const pos = editor.value?.state.selection.from ?? 0
+  let index: number
+  if (direction === 1) {
+    index = matches.findIndex((m) => m.from >= pos)
+    if (index === -1) index = 0
+  } else {
+    // 光标之前最近的命中（选区起始前），无则回绕到最后一个
+    const before = matches.filter((m) => m.from < pos)
+    index = before.length > 0 ? matches.indexOf(before[before.length - 1]) : matches.length - 1
+  }
+  selectMatch(matches, index)
+}
+
+/**
+ * 替换当前选区并查找下一个：
+ * 选区为空或与命中不一致时，先定位到下一个命中
+ */
+const replaceCurrent = (): void => {
+  const e = editor.value
+  if (!e) return
+  const matches = computeMatches()
+  const { from, to, empty } = e.state.selection
+  const isCurrent = !empty && matches.some((m) => m.from === from && m.to === to)
+  if (!isCurrent) {
+    findMatch(1)
+    return
+  }
+  e.chain().focus().insertContent(replaceTextValue.value).run()
+  findMatch(1)
+}
+
+/**
+ * 全部替换：从文档末尾向前逐个替换，避免位置偏移；
+ * 每次替换通过 insertContentAt 完成，自动触发内容更新与保存
+ */
+const replaceAll = (): void => {
+  const e = editor.value
+  const keyword = findText.value.trim()
+  if (!e || !keyword) return
+  const matches = computeMatches()
+  if (matches.length === 0) {
+    ElMessage.info('未找到匹配内容')
+    return
+  }
+  for (let i = matches.length - 1; i >= 0; i--) {
+    e.chain().focus().insertContentAt({ from: matches[i].from, to: matches[i].to }, replaceTextValue.value).run()
+  }
+  ElMessage.success(`已替换 ${matches.length} 处`)
+  refreshMatches()
+}
+
+/**
+ * 打开查找栏：有选区时预填关键词并聚焦
+ */
+const openFindBar = (): void => {
+  findBarVisible.value = true
+  const e = editor.value
+  if (e) {
+    const { from, to } = e.state.selection
+    if (to > from) {
+      findText.value = e.state.doc.textBetween(from, to, ' ')
+    }
+  }
+  nextTick(() => findInputRef.value?.focus())
+  refreshMatches()
+}
+
+/** 关闭查找栏 */
+const closeFindBar = (): void => {
+  findBarVisible.value = false
+  editor.value?.chain().focus().run()
+}
+
+/** 查找关键词变化：重置命中统计 */
+watch(findText, () => {
+  matchIndex.value = 0
+  refreshMatches()
+})
+
+/** 查找输入框回车：查找下一个 */
+const onFindKeydown = (event: KeyboardEvent): void => {
+  if (event.key === 'Enter') {
+    event.preventDefault()
+    if (event.shiftKey) {
+      findMatch(-1)
+    } else {
+      findMatch(1)
+    }
+  } else if (event.key === 'Escape') {
+    event.preventDefault()
+    closeFindBar()
+  }
+}
 </script>
 
 <template>
@@ -1258,6 +1464,18 @@ const runAiEdit = async (): Promise<void> => {
               <el-icon :size="15"><MagicStick /></el-icon>
             </button>
           </el-tooltip>
+          <el-tooltip content="查找与替换（Ctrl+F）" placement="top" :show-after="400">
+            <button
+              type="button"
+              class="tool-btn"
+              :class="{ 'is-active': findBarVisible }"
+              title="查找与替换"
+              @mousedown.prevent
+              @click="findBarVisible ? closeFindBar() : openFindBar()"
+            >
+              <el-icon :size="15"><Search /></el-icon>
+            </button>
+          </el-tooltip>
           <el-tooltip content="切换 Markdown 视图" placement="top" :show-after="400">
             <button
               type="button"
@@ -1269,6 +1487,38 @@ const runAiEdit = async (): Promise<void> => {
             </button>
           </el-tooltip>
         </div>
+      </div>
+
+      <!-- 查找与替换栏 -->
+      <div v-if="findBarVisible" class="find-bar">
+        <input
+          ref="findInputRef"
+          v-model="findText"
+          class="find-input"
+          type="text"
+          placeholder="查找内容（不区分大小写）"
+          @keydown="onFindKeydown"
+        />
+        <span class="find-count">{{ matchTotal > 0 ? `${matchIndex + 1}/${matchTotal}` : '无结果' }}</span>
+        <button type="button" class="find-btn" title="上一个（Shift+Enter）" @click="findMatch(-1)">
+          <el-icon :size="14"><ArrowUp /></el-icon>
+        </button>
+        <button type="button" class="find-btn" title="下一个（Enter）" @click="findMatch(1)">
+          <el-icon :size="14"><ArrowDown /></el-icon>
+        </button>
+        <span class="find-divider"></span>
+        <input
+          v-model="replaceTextValue"
+          class="find-input"
+          type="text"
+          placeholder="替换为（留空表示删除）"
+          @keydown="onFindKeydown"
+        />
+        <button type="button" class="find-btn find-btn-text" @click="replaceCurrent">替换</button>
+        <button type="button" class="find-btn find-btn-text" @click="replaceAll">全部替换</button>
+        <button type="button" class="find-btn find-btn-text find-close" @click="closeFindBar">
+          关闭
+        </button>
       </div>
 
       <!-- 文本编辑区 -->
@@ -1578,6 +1828,78 @@ const runAiEdit = async (): Promise<void> => {
   border-radius: 5px;
   background: transparent;
   cursor: pointer;
+}
+
+/* ==================== 文本编辑区 ==================== */
+/* ==================== 查找与替换栏 ==================== */
+.find-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--el-fill-color-light);
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+
+.find-input {
+  width: 200px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 5px;
+  background: var(--el-bg-color);
+  color: var(--el-text-color-primary);
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.find-input:focus {
+  border-color: var(--el-color-primary);
+}
+
+.find-count {
+  min-width: 52px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  user-select: none;
+}
+
+.find-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  padding: 0 6px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--el-text-color-regular);
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+.find-btn:hover {
+  background: var(--el-fill-color);
+  color: var(--el-color-primary);
+}
+
+.find-btn-text {
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.find-divider {
+  width: 1px;
+  height: 18px;
+  margin: 0 2px;
+  background: var(--el-border-color-lighter);
+}
+
+.find-close {
+  margin-left: auto;
 }
 
 /* ==================== 文本编辑区 ==================== */

@@ -7,7 +7,7 @@
  * 本页面只负责文件读取与自动保存，不再包含任何编辑器实现。
  */
 import { ref, computed, onMounted, nextTick, watch } from 'vue'
-import { ArrowLeft, ArrowRight, Plus, Delete, EditPen, Minus, Check, Fold } from '@element-plus/icons-vue'
+import { ArrowLeft, ArrowRight, Plus, Delete, EditPen, Minus, Check, Fold, Search, ArrowDownBold, ArrowUpBold } from '@element-plus/icons-vue'
 import type { TabsPaneContext, RenderContentContext, TreeInstance, ElInput } from 'element-plus'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import BackHome from '../components/BackHome.vue'
@@ -94,7 +94,11 @@ const addFile = async (data: Data): Promise<void> => {
   const newNode = { label: '', node_key: editNodeKey.value, parent: data.node_key }
   if (data.node_key === 'commonFiles') {
     // 数据绑定修改（同时同步到树的常用文档子节点，保持目录形态）
-    commonFiles.value.push(newNode)
+    // 注意：loadRootFiles 中 commonFiles.value 与树节点 children 是同一数组引用，
+    // 仅在两者不是同一数组时才需要额外 push，避免重复添加出现两个输入框
+    if (commonFiles.value !== data.children) {
+      commonFiles.value.push(newNode)
+    }
     data.children?.push(newNode)
     nextTick(() => {
       editCommonInputRef.value?.focus()
@@ -376,6 +380,48 @@ const treeProps = {
   label: 'label'
 }
 
+// === 全部文档搜索（按文件名过滤，目录下存在匹配文件时保留该目录） ===
+const searchKeyword = ref('')
+
+const filteredTreeData = computed<FileTreeNode[]>(() => {
+  const kw = searchKeyword.value.trim().toLowerCase()
+  if (!kw) return fileTreeData.value
+  // 节点是否命中：文件按名称匹配，目录递归检查子节点
+  const match = (node: FileTreeNode): boolean => {
+    if (!node.children) return node.label.toLowerCase().includes(kw)
+    return node.children.some(match)
+  }
+  const filter = (nodes: FileTreeNode[]): FileTreeNode[] =>
+    nodes
+      .filter(match)
+      .map((n) => ({ ...n, children: n.children ? filter(n.children) : undefined }))
+  return filter(fileTreeData.value)
+})
+
+// 全部展开/收起（遍历过滤后的树，仅操作目录节点）
+const treeExpanded = ref(false)
+const toggleTreeExpanded = (): void => {
+  treeExpanded.value = !treeExpanded.value
+  setAllExpanded(treeExpanded.value)
+}
+
+// 搜索时树自动展开，同步切换按钮状态；清空搜索恢复收起态
+watch(searchKeyword, (kw) => {
+  treeExpanded.value = kw.trim() !== ''
+})
+
+const setAllExpanded = (expanded: boolean): void => {
+  const walk = (nodes?: FileTreeNode[]): void => {
+    nodes?.forEach((n) => {
+      if (!n.children) return
+      const node = treeAllRef.value?.getNode(n)
+      if (node) node.expanded = expanded
+      walk(n.children)
+    })
+  }
+  walk(filteredTreeData.value)
+}
+
 // handleCheckChange 处理树节点选中变化
 const handleCheckChange = (checkedKeys: string[], node: FileTreeNode): void => {
   void checkedKeys
@@ -556,11 +602,32 @@ watch(editorContent, () => {
               </div>
             </el-tab-pane>
             <el-tab-pane label="全部文档" name="all">
+              <!-- 搜索框：按文件名过滤，右侧为全部展开/收起按钮 -->
+              <div class="tree-search-bar">
+                <el-input
+                  v-model="searchKeyword"
+                  placeholder="搜索文件名"
+                  clearable
+                  class="tree-search-input"
+                  @click.stop
+                >
+                  <template #prefix>
+                    <el-icon><Search /></el-icon>
+                  </template>
+                </el-input>
+                <el-tooltip :content="treeExpanded ? '全部收起' : '全部展开'" placement="top">
+                  <el-icon class="expand-toggle-icon" @click="toggleTreeExpanded">
+                    <ArrowUpBold v-if="treeExpanded" />
+                    <ArrowDownBold v-else />
+                  </el-icon>
+                </el-tooltip>
+              </div>
               <el-tree
                 ref="treeAllRef"
-                :data="fileTreeData"
+                :data="filteredTreeData"
                 node-key="node_key"
                 :props="treeProps"
+                :default-expand-all="searchKeyword.trim() !== ''"
                 @check-change="handleCheckChange"
               >
                 <template #default="{ node, data }">
@@ -817,6 +884,27 @@ watch(editorContent, () => {
 :deep(.el-tab-pane) {
   height: 100%;
   overflow-y: auto;
+}
+
+/* 全部文档搜索栏 */
+.tree-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.tree-search-input {
+  flex: 1;
+}
+
+.expand-toggle-icon {
+  cursor: pointer;
+  color: var(--el-text-color-secondary);
+
+  &:hover {
+    color: var(--el-color-primary);
+  }
 }
 
 /* 常用文档样式 */
