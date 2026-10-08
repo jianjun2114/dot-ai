@@ -1,6 +1,6 @@
 # dot-ai
 
-> AI 驱动的桌面工作台 —— 集智能对话、智能体、Shell、浏览器、接口测试、文档编辑转换、数据库操作于一体。
+> AI 驱动的桌面工作台 —— 集智能对话、智能体、Shell、浏览器、接口测试、文档编辑转换、数据库操作、邮箱收发于一体。
 
 [![Electron](https://img.shields.io/badge/Electron-43-9feaf9?logo=electron\&logoColor=black)](https://www.electronjs.org/)
 [![Vue](https://img.shields.io/badge/Vue-3-42b883?logo=vite\&logoColor=white)](https://vuejs.org/)
@@ -35,7 +35,8 @@
 | ✍️ 百宝箱 · 文档编辑   | ONLYOFFICE 在线编辑 Word / Excel / PPT，文件列表管理与实时保存                                |
 | 🗄️ 百宝箱 · 数据库   | 多连接管理、SQL 查询（分页 / 解释计划 / 保存脚本）、上下文智能补全、表结构查看与编辑、数据增删改、序列 / 存储过程查看             |
 | 🎨 百宝箱 · 画图     | PS 风格画板，画笔 / 图形绘制与导出                                                          |
-| 📒 日历笔记         | Tiptap 富文本编辑器，按日期归档                                                           |
+| 📮 百宝箱 · 邮箱     | 邮箱收发与管理，富文本邮件撰写                                                               |
+| 📒 日历笔记         | Tiptap 富文本 / Markdown 双视图编辑器，按日期归档，支持字号、颜色、高亮、对齐、表格、图片、查找替换、AI 编辑与去除格式         |
 | ⚙️ 设置中心         | 多 LLM endpoint、对话模式、内置工具、主题切换                                                 |
 
 ## 🛠️ 技术栈
@@ -51,6 +52,7 @@
 | 文档处理     | mammoth · pdfjs-dist · jsPDF + html2canvas · JSZip   |
 | 在线办公     | ONLYOFFICE Document Server + JWT                     |
 | 数据库      | oracledb（thin）· mysql2/promise · pg                  |
+| 邮件       | nodemailer（SMTP 发送）· imapflow + mailparser（IMAP 收取解析） |
 | 打包       | electron-builder（NSIS / DMG / AppImage + deb + snap） |
 
 ## 🚀 快速开始
@@ -101,7 +103,8 @@ dot-ai/
 │   │   ├── index.ts           窗口 + 基础 IPC
 │   │   ├── toolboxShell.ts    Shell / SSH / SFTP
 │   │   ├── toolboxNet.ts      HTTP / WS / TCP 代理
-│   │   └── toolboxDb.ts       数据库连接 / 查询 / 结构变更
+│   │   ├── toolboxDb.ts       数据库连接 / 查询 / 结构变更
+│   │   └── toolboxMail.ts     邮箱收发（SMTP / IMAP）
 │   ├── preload/           # 预加载脚本（contextBridge → window.dot）
 │   └── renderer/          # 渲染进程（Vue 3 SPA）
 ├── electron-builder.yml   # 打包配置（NSIS 自定义路径等）
