@@ -47,6 +47,8 @@ export interface HuangLiData {
   nextTerm: NextEventInfo | null
   // 下一个节日
   nextFestival: NextEventInfo | null
+  // 下一个调休补班日
+  nextTiaoXiu: NextEventInfo | null
   // 方位
   wealthGod: string
   xiGod: string
@@ -125,7 +127,8 @@ export function getFestivals(date: Date): string[] {
   const solar = Solar.fromDate(date)
   const festivals: string[] = [...solar.getFestivals(), ...solar.getLunar().getFestivals()]
   const holiday = HolidayUtil.getHoliday(solar.getYear(), solar.getMonth(), solar.getDay())
-  if (holiday) festivals.push(holiday.getName())
+  // 调休补班日也挂节假日名（如国庆节调休日），拼接“调休日”后缀以示区分
+  if (holiday) festivals.push(holiday.isWork() ? `${holiday.getName()}调休日` : holiday.getName())
   return festivals
 }
 
@@ -163,7 +166,8 @@ export function getNextFestival(date: Date): NextEventInfo | null {
       const solar = start.next(i)
       const names = [...solar.getFestivals(), ...solar.getLunar().getFestivals()]
       const holiday = HolidayUtil.getHoliday(solar.getYear(), solar.getMonth(), solar.getDay())
-      if (holiday) names.push(holiday.getName())
+      // 倒计时只统计真节日，跳过调休补班日
+      if (holiday && !holiday.isWork()) names.push(holiday.getName())
       if (names.length > 0) {
         // 同一天可能被公历/农历/法定节假日重复命中（如中秋节），去重后再返回
         return { name: [...new Set(names)].join('、'), days: i, date: solarToYmd(solar) }
@@ -172,6 +176,29 @@ export function getNextFestival(date: Date): NextEventInfo | null {
     return null
   } catch (e) {
     console.error('计算下一个节日失败:', e)
+    return null
+  }
+}
+
+/**
+ * 获取下一个调休补班日（单独计算，与节气 / 节日互不影响）
+ * 从基准日期次日起逐日向后扫描（最多 370 天），
+ * 命中节假日调休补班日（isWork）即返回。
+ * @param date 基准日期
+ */
+export function getNextTiaoXiu(date: Date): NextEventInfo | null {
+  try {
+    const start = Solar.fromDate(date)
+    for (let i = 1; i <= 370; i++) {
+      const solar = start.next(i)
+      const holiday = HolidayUtil.getHoliday(solar.getYear(), solar.getMonth(), solar.getDay())
+      if (holiday && holiday.isWork()) {
+        return { name: `${holiday.getName()}调休日`, days: i, date: solarToYmd(solar) }
+      }
+    }
+    return null
+  } catch (e) {
+    console.error('计算下一个调休日失败:', e)
     return null
   }
 }
@@ -196,9 +223,10 @@ export function getHuangLi(date: Date): HuangLiData {
   // 节日
   const festivals = getFestivals(date)
 
-  // 下一个节气 / 节日（各自独立计算，互不干扰）
+  // 下一个节气 / 节日 / 调休日（各自独立计算，互不干扰）
   const nextTerm = getNextSolarTerm(date)
   const nextFestival = getNextFestival(date)
+  const nextTiaoXiu = getNextTiaoXiu(date)
 
   // 宜忌
   const yi = lunar.getDayYi() ?? []
@@ -263,6 +291,7 @@ export function getHuangLi(date: Date): HuangLiData {
     festivals,
     nextTerm,
     nextFestival,
+    nextTiaoXiu,
     wealthGod,
     xiGod,
     fuShen,

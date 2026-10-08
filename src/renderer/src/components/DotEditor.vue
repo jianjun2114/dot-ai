@@ -132,7 +132,9 @@ const ICONS: Record<string, string> = {
   horizontalRule:
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="5" x2="10" y2="5"/><line x1="14" y1="5" x2="21" y2="5"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="19" x2="10" y2="19"/><line x1="14" y1="19" x2="21" y2="19"/></svg>',
   markdownView:
-    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 15v-5l2.5 2.5L11 10v5"/><line x1="15" y1="10" x2="18" y2="14"/><line x1="18" y1="10" x2="15" y2="14"/></svg>'
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 15v-5l2.5 2.5L11 10v5"/><line x1="15" y1="10" x2="18" y2="14"/><line x1="18" y1="10" x2="15" y2="14"/></svg>',
+  clearFormat:
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><text x="4" y="15" font-size="13" font-weight="600" fill="currentColor" stroke="none">T</text><line x1="13" y1="9" x2="21" y2="9"/><line x1="4" y1="19" x2="20" y2="19"/></svg>'
 }
 
 // ============================== 粘贴内容处理 ==============================
@@ -598,6 +600,23 @@ const toggleIndent = (): void => {
 const toggleVCenter = (): void => {
   const current = editor.value?.getAttributes('paragraph').vCenter
   editor.value?.chain().focus().updateAttributes('paragraph', { vCenter: !current }).run()
+}
+
+/**
+ * 去除全部格式：
+ * 清除文字样式（加粗/斜体/字号/字体颜色/高亮/链接等）与段落属性
+ * （对齐/首行缩进/垂直居中），标题、列表、引用、代码块等块级结构
+ * 降级为普通段落，保留原始文本、换行和空格。
+ */
+const clearAllFormatting = (): void => {
+  editor.value
+    ?.chain()
+    .focus()
+    .clearNodes()
+    .unsetAllMarks()
+    .updateAttributes('paragraph', { indent: false, vCenter: false })
+    .setTextAlign('left')
+    .run()
 }
 
 // ============================== 插入区操作 ==============================
@@ -1438,6 +1457,21 @@ const onFindKeydown = (event: KeyboardEvent): void => {
         <!-- 功能区 -->
         <div class="tool-zone">
           <span class="zone-label">功能</span>
+          <el-tooltip
+            content="去除格式（保留原始文本、换行和空格）"
+            placement="top"
+            :show-after="400"
+          >
+            <button
+              type="button"
+              class="tool-btn"
+              title="去除格式"
+              @mousedown.prevent
+              @click="clearAllFormatting"
+            >
+              <span class="tool-icon" v-html="ICONS.clearFormat"></span>
+            </button>
+          </el-tooltip>
           <el-tooltip
             content="导出（HTML 标签 / Word / PDF / TXT）"
             placement="top"

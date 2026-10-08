@@ -35,6 +35,52 @@ export interface DbIndexInfo {
   refColumns?: string
 }
 
+/** 邮箱账户类型：IMAP 真实收发，exchange / pop3 暂仅保存配置 */
+export type MailAccountType = 'imap' | 'exchange' | 'pop3'
+
+/** 邮箱账户（明文保存在 mail.json 中） */
+export interface MailAccount {
+  id: string
+  type: MailAccountType
+  email: string
+  password: string
+  imapHost: string
+  imapPort: number
+  imapSsl?: boolean
+  smtpHost: string
+  smtpPort: number
+  smtpSsl?: boolean
+}
+
+/** 邮件列表项摘要 */
+export interface MailSummary {
+  uid: number
+  subject: string
+  fromName: string
+  fromAddr: string
+  to: string
+  cc: string
+  date: string
+  size: number
+  seen: boolean
+  hasAttachment: boolean
+}
+
+/** 邮件详情 */
+export interface MailDetail {
+  uid: number
+  subject: string
+  fromName: string
+  fromAddr: string
+  to: string
+  cc: string
+  date: string
+  size: number
+  html: string
+  text: string
+  attachments: { filename: string; contentType: string; size: number }[]
+}
+
 /** 通用 IPC 事件监听器封装 */
 const on = (channel: string, callback: (payload: unknown) => void): (() => void) => {
   const listener = (_event: IpcRendererEvent, payload: unknown): void => callback(payload)
@@ -292,6 +338,105 @@ const toolbox = {
       comment?: string
     }): Promise<{ executed: string[] }> =>
       ipcRenderer.invoke('tb:db-alter-column', JSON.parse(JSON.stringify(params)))
+  },
+
+  // ---------- 邮箱 ----------
+  mail: {
+    /** 测试账户连通性（IMAP + SMTP，均立即断开） */
+    test: (account: MailAccount): Promise<{ success: boolean; message: string }> =>
+      ipcRenderer.invoke('tb:mail-test', JSON.parse(JSON.stringify(account))),
+
+    /** 拉取收件箱邮件列表（可传增量选项：POP3 knownUids 跳过已知邮件；IMAP sinceUid 只取更新邮件） */
+    list: (
+      account: MailAccount,
+      options?: { knownUids?: number[]; sinceUid?: number }
+    ): Promise<MailSummary[]> =>
+      ipcRenderer.invoke(
+        'tb:mail-list',
+        JSON.parse(JSON.stringify(account)),
+        options ? JSON.parse(JSON.stringify(options)) : undefined
+      ),
+
+    /** 拉取单封邮件详情 */
+    fetch: (account: MailAccount, uid: number): Promise<MailDetail> =>
+      ipcRenderer.invoke('tb:mail-fetch', JSON.parse(JSON.stringify(account)), uid),
+
+    /** 下载附件（按文件名定位，返回 base64） */
+    attachment: (
+      account: MailAccount,
+      uid: number,
+      filename: string
+    ): Promise<{ contentBase64: string; contentType: string }> =>
+      ipcRenderer.invoke(
+        'tb:mail-attachment',
+        JSON.parse(JSON.stringify(account)),
+        uid,
+        filename
+      ),
+
+    /** 发送邮件（SMTP，attachments 为附件本地路径） */
+    send: (
+      account: MailAccount,
+      mail: {
+        to: string
+        cc?: string
+        subject: string
+        html: string
+        inReplyTo?: string
+        attachments?: string[]
+      }
+    ): Promise<{ success: boolean; message: string }> =>
+      ipcRenderer.invoke(
+        'tb:mail-send',
+        JSON.parse(JSON.stringify(account)),
+        JSON.parse(JSON.stringify(mail))
+      ),
+
+    /** 批量标记已读 / 未读 */
+    markSeen: (account: MailAccount, uids: number[], seen: boolean): Promise<void> =>
+      ipcRenderer.invoke('tb:mail-mark-seen', JSON.parse(JSON.stringify(account)), uids, seen),
+
+    /** 批量删除邮件 */
+    remove: (account: MailAccount, uids: number[]): Promise<void> =>
+      ipcRenderer.invoke('tb:mail-delete', JSON.parse(JSON.stringify(account)), uids),
+
+    /** 读取本地文件为 base64（写信插入图片用） */
+    readFileBase64: (path: string): Promise<string> =>
+      ipcRenderer.invoke('tb:mail-read-file-base64', path),
+
+    /** 用系统默认程序打开本地文件 */
+    openPath: (path: string): Promise<{ success: boolean; message: string }> =>
+      ipcRenderer.invoke('tb:mail-open-path', path),
+
+    /** 保存 base64 内容到本地缓存目录并返回路径（附件"查看"用） */
+    saveTemp: (filename: string, contentBase64: string): Promise<string> =>
+      ipcRenderer.invoke('tb:mail-save-temp', filename, contentBase64),
+
+    /** 打开写信独立窗口（payload：accountId / draftId / to / cc / subject / body） */
+    openCompose: (payload: Record<string, unknown>): Promise<{ success: boolean }> =>
+      ipcRenderer.invoke('tb:mail-open-compose', JSON.parse(JSON.stringify(payload))),
+
+    /** 写信窗口加载后拉取初始数据（取走即清空） */
+    takeComposePayload: (): Promise<Record<string, unknown> | null> =>
+      ipcRenderer.invoke('tb:mail-take-compose-payload'),
+
+    /** 渲染进程确认后真正关闭写信窗口 */
+    composeClose: (): Promise<{ success: boolean }> =>
+      ipcRenderer.invoke('tb:mail-compose-close'),
+
+    /** 订阅写信窗口关闭请求（点 X 时主进程转发） */
+    onComposeCloseRequest: (callback: () => void): (() => void) => {
+      const listener = (): void => callback()
+      ipcRenderer.on('mail-compose:close-request', listener)
+      return () => ipcRenderer.removeListener('mail-compose:close-request', listener)
+    },
+
+    /** 订阅写信窗口 payload 更新（复用窗口时重新拉取初始数据） */
+    onComposePayloadUpdated: (callback: () => void): (() => void) => {
+      const listener = (): void => callback()
+      ipcRenderer.on('mail-compose:payload-updated', listener)
+      return () => ipcRenderer.removeListener('mail-compose:payload-updated', listener)
+    }
   },
 
   // ---------- 文件对话框（文档转换等） ----------

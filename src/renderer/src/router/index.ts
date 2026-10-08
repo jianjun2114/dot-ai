@@ -12,6 +12,8 @@ const PAGE_TITLES: Record<string, string> = {
   ToolboxDoc: '文档转换',
   ToolboxDocEdit: '文档编辑',
   ToolboxDrawing: '画图',
+  ToolboxMail: '邮箱',
+  ToolboxMailCompose: '写邮件',
   ToolboxShell: '终端 - 百宝箱',
   ToolboxBrowser: '浏览器 - 百宝箱',
   ToolboxDatabase: '数据库 - 百宝箱',
@@ -69,6 +71,12 @@ const routes: RouteRecordRaw[] = [
         path: 'drawing',
         name: 'ToolboxDrawing',
         component: () => import('../views/toolbox/DrawingView.vue')
+      },
+      {
+        // 邮箱
+        path: 'mail',
+        name: 'ToolboxMail',
+        component: () => import('../views/toolbox/MailView.vue')
       }
     ]
   },
@@ -77,6 +85,12 @@ const routes: RouteRecordRaw[] = [
     path: '/toolbox/shell',
     name: 'ToolboxShell',
     component: () => import('../views/toolbox/ShellView.vue')
+  },
+  {
+    // 写邮件独立窗口页面（由主进程新窗口加载）
+    path: '/toolbox/mail-compose',
+    name: 'ToolboxMailCompose',
+    component: () => import('../views/toolbox/MailComposeView.vue')
   },
   {
     // 浏览器独立窗口页面（由主进程新窗口加载）

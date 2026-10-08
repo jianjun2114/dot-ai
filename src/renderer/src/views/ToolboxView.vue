@@ -9,6 +9,7 @@ import docConvSvg from '../assets/doc_conv.svg'
 import editDocSvg from '../assets/edit_doc.svg'
 import dbSvg from '../assets/db.svg'
 import drawingSvg from '../assets/ps_canvs.svg'
+import mailSvg from '../assets/mail.svg'
 
 const router = useRouter()
 const route = useRoute()
@@ -97,6 +98,16 @@ const features = [
     accent: 'var(--color-warning)',
     handler: (): void => {
       router.push({ name: 'ToolboxDrawing' })
+    }
+  },
+  {
+    key: 'mail',
+    title: '邮箱',
+    desc: '多账户邮件客户端，支持 IMAP / POP3 / Exchange 企业邮箱配置，收件、回复、转发与草稿管理',
+    icon: mailSvg,
+    accent: 'var(--color-primary)',
+    handler: (): void => {
+      router.push({ name: 'ToolboxMail' })
     }
   }
 ]

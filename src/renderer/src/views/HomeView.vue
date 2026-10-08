@@ -111,6 +111,9 @@ const termClass = computed(() => countdownClass(huangLi.value.nextTerm?.days))
 
 const festivalDayClass = computed(() => countdownClass(huangLi.value.nextFestival?.days))
 
+/** 下一个调休补班日 */
+const nextTiaoXiu = computed(() => huangLi.value.nextTiaoXiu)
+
 // ==================== AI 宜忌建议 ====================
 const { settings } = useSettings()
 
@@ -293,8 +296,12 @@ watch(
         >
           <span>
             {{ nextFestival.name }}（{{ nextFestival.date }}，还有
-            <b :class="festivalDayClass">{{ nextFestival.days }}</b> 天）
+            <b class="festival-num" :class="festivalDayClass">{{ nextFestival.days }}</b> 天）
           </span>
+        </div>
+        <!-- 下一个调休补班日：3 天内自动展示，仅展示日期 -->
+        <div v-if="nextTiaoXiu && nextTiaoXiu.days <= 3" class="countdown-line">
+          <span class="tiaoxiu-text">{{ nextTiaoXiu.name }}（{{ nextTiaoXiu.date }}）</span>
         </div>
       </section>
 
@@ -512,6 +519,18 @@ watch(
   text-align: center;
   font-size: 13px;
   color: rgba(255, 255, 255, 0.8);
+}
+
+/* 调休补班日红字展示 */
+.tiaoxiu-text {
+  color: #ff4d4f;
+  font-weight: 500;
+}
+
+/* 节假日倒计时数字：字号放大 1.5 倍并加粗 */
+.festival-num {
+  font-size: 1.5em;
+  font-weight: 700;
 }
 
 /* 倒计时数字紧迫度配色（仅数字变色） */

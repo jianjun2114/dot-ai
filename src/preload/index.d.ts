@@ -57,6 +57,50 @@ interface DbQueryResult {
   truncated: boolean
 }
 
+/** 邮箱账户类型：qq / 163 / 通用 IMAP 真实收发，exchange / pop3 暂仅保存配置 */
+type MailAccountType = 'qq' | '163' | 'imap' | 'exchange' | 'pop3'
+
+/** 邮箱账户（明文保存在 mail.json 中） */
+interface MailAccount {
+  id: string
+  type: MailAccountType
+  email: string
+  password: string
+  imapHost: string
+  imapPort: number
+  smtpHost: string
+  smtpPort: number
+}
+
+/** 邮件列表项摘要 */
+interface MailSummary {
+  uid: number
+  subject: string
+  fromName: string
+  fromAddr: string
+  to: string
+  cc: string
+  date: string
+  size: number
+  seen: boolean
+  hasAttachment: boolean
+}
+
+/** 邮件详情 */
+interface MailDetail {
+  uid: number
+  subject: string
+  fromName: string
+  fromAddr: string
+  to: string
+  cc: string
+  date: string
+  size: number
+  html: string
+  text: string
+  attachments: { filename: string; contentType: string; size: number }[]
+}
+
 /** 百宝箱 API 类型定义 */
 export interface ToolboxApi {
   /** 打开独立 Shell 窗口 */
@@ -212,9 +256,86 @@ export interface ToolboxApi {
       outputPath: string
     }) => Promise<{ success: boolean; engine?: string; message?: string }>
   }
+
+  mail: {
+    test: (account: MailAccount) => Promise<{ success: boolean; message: string }>
+    list: (
+      account: MailAccount,
+      options?: { knownUids?: number[]; sinceUid?: number }
+    ) => Promise<MailSummary[]>
+    fetch: (account: MailAccount, uid: number) => Promise<MailDetail>
+    attachment: (
+      account: MailAccount,
+      uid: number,
+      filename: string
+    ) => Promise<{ contentBase64: string; contentType: string }>
+    send: (
+      account: MailAccount,
+      mail: {
+        to: string
+        cc?: string
+        subject: string
+        html: string
+        inReplyTo?: string
+        attachments?: string[]
+      }
+    ) => Promise<{ success: boolean; message: string }>
+    markSeen: (account: MailAccount, uids: number[], seen: boolean) => Promise<void>
+    remove: (account: MailAccount, uids: number[]) => Promise<void>
+    openPath: (path: string) => Promise<{ success: boolean; message: string }>
+    readFileBase64: (path: string) => Promise<string>
+    saveTemp: (filename: string, contentBase64: string) => Promise<string>
+    openCompose: (payload: Record<string, unknown>) => Promise<{ success: boolean }>
+    takeComposePayload: () => Promise<Record<string, unknown> | null>
+    composeClose: () => Promise<{ success: boolean }>
+    onComposeCloseRequest: (callback: () => void) => () => void
+    onComposePayloadUpdated: (callback: () => void) => () => void
+  }
 }
 
 declare global {
+  type MailAccountType = 'imap' | 'exchange' | 'pop3'
+
+  interface MailAccount {
+    id: string
+    type: MailAccountType
+    email: string
+    password: string
+    imapHost: string
+    imapPort: number
+    imapSsl?: boolean
+    smtpHost: string
+    smtpPort: number
+    smtpSsl?: boolean
+  }
+
+  interface MailSummary {
+    uid: number
+    subject: string
+    fromName: string
+    fromAddr: string
+    to: string
+    cc: string
+    date: string
+    size: number
+    seen: boolean
+    hasAttachment: boolean
+  }
+
+  interface MailDetail {
+    uid: number
+    subject: string
+    fromName: string
+    fromAddr: string
+    to: string
+    cc: string
+    date: string
+    size: number
+    html: string
+    text: string
+    attachments: { filename: string; contentType: string; size: number }[]
+  }
+
   interface Window {
     electron: ElectronAPI
     dot: {

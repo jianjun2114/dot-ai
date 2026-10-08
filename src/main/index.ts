@@ -9,6 +9,7 @@ import fs from 'fs'
 import { registerToolboxShellIpc } from './toolboxShell'
 import { registerToolboxNetIpc } from './toolboxNet'
 import { registerToolboxDbIpc } from './toolboxDb'
+import { registerToolboxMailIpc } from './toolboxMail'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -346,6 +347,7 @@ app.whenReady().then(() => {
   registerToolboxShellIpc()
   registerToolboxNetIpc()
   registerToolboxDbIpc()
+  registerToolboxMailIpc()
 
   // 打开百宝箱 Shell 独立窗口
   ipcMain.handle('tb:open-shell-window', () => {
@@ -423,6 +425,68 @@ app.whenReady().then(() => {
         hash: '/toolbox/database'
       })
     }
+    return { success: true }
+  })
+
+  // ---------- 邮箱写信独立窗口 ----------
+
+  /** 待传递给写信窗口的初始数据（打开窗口前设置，窗口加载后取走） */
+  let mailComposePayload: Record<string, unknown> | null = null
+  let mailComposeWindow: BrowserWindow | null = null
+
+  // 打开写信窗口（payload：accountId / draftId / to / cc / subject / body）
+  ipcMain.handle('tb:mail-open-compose', (_event, payload: Record<string, unknown>) => {
+    mailComposePayload = payload
+    // 已有写信窗口时聚焦复用，新 payload 由窗口重新拉取
+    if (mailComposeWindow && !mailComposeWindow.isDestroyed()) {
+      mailComposeWindow.focus()
+      mailComposeWindow.webContents.send('mail-compose:payload-updated')
+      return { success: true }
+    }
+    mailComposeWindow = new BrowserWindow({
+      width: 1080,
+      height: 760,
+      minWidth: 860,
+      minHeight: 600,
+      title: '写邮件',
+      autoHideMenuBar: true,
+      ...(process.platform === 'linux' ? { icon } : {}),
+      webPreferences: {
+        preload: join(__dirname, '../preload/index.js'),
+        sandbox: false
+      }
+    })
+    // 拦截窗口关闭：交由渲染进程确认是否保存草稿后再真正关闭
+    const composeWin = mailComposeWindow
+    composeWin.on('close', (e) => {
+      if (!composeWin.isDestroyed()) {
+        e.preventDefault()
+        composeWin.webContents.send('mail-compose:close-request')
+      }
+    })
+    if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
+      mailComposeWindow.loadURL(`${process.env['ELECTRON_RENDERER_URL']}#/toolbox/mail-compose`)
+    } else {
+      mailComposeWindow.loadFile(join(__dirname, '../renderer/index.html'), {
+        hash: '/toolbox/mail-compose'
+      })
+    }
+    return { success: true }
+  })
+
+  // 写信窗口加载后拉取初始数据（取走即清空）
+  ipcMain.handle('tb:mail-take-compose-payload', () => {
+    const payload = mailComposePayload
+    mailComposePayload = null
+    return payload
+  })
+
+  // 渲染进程确认后真正关闭写信窗口
+  ipcMain.handle('tb:mail-compose-close', () => {
+    if (mailComposeWindow && !mailComposeWindow.isDestroyed()) {
+      mailComposeWindow.destroy()
+    }
+    mailComposeWindow = null
     return { success: true }
   })
 
